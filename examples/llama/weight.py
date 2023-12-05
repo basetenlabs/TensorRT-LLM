@@ -851,11 +851,6 @@ def load_from_binary(tensorrt_llm_llama: LLaMAForCausalLM,
             3 * n_embd // mapping.tp_size) if not multi_query_mode else (
                 n_embd // mapping.tp_size +
                 (n_embd // n_groups) // mapping.tp_size * 2)
-# Pankaj: original code
-#        c_attn_out_dim = (
-#            3 * n_embd // mapping.tp_size) if not multi_query_mode else (
-#                n_embd // mapping.tp_size +
-#                (n_embd // n_head * n_groups) // mapping.tp_size * 2)
         idx = i - mapping.pp_rank * layers_per_pipeline_stage
         tensorrt_llm_llama.layers[idx].input_layernorm.weight.value = (fromfile(
             dir_path, 'model.layers.' + str(i) + '.input_layernorm.weight.bin'))
