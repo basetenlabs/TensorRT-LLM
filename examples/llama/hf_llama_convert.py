@@ -204,6 +204,9 @@ def hf_gpt_converter(args):
         if args.smoothquant is not None:
             smooth_llama_model(model, act_range, args.smoothquant,
                                llama_qkv_para, llama_smoother)
+            for k, v in act_range.items():
+                if act_range[k]["w"].dtype == torch.bfloat16:
+                    act_range[k]["w"] = act_range[k]["w"].to(torch.float16)
 
     args.multi_query_mode = model.config.num_attention_heads != model.config.num_key_value_heads
     config = configparser.ConfigParser()
@@ -250,6 +253,8 @@ def hf_gpt_converter(args):
 
         param = transpose_weights(name, param)
 
+        if param.dtype == torch.bfloat16:
+            param = param.to(torch.float16)
         param = param.detach().cpu().numpy().astype(storage_type)
 
         if ft_name in global_ft_weights:
@@ -259,11 +264,14 @@ def hf_gpt_converter(args):
             local_dim = model.config.hidden_size if args.multi_query_mode else None
             if args.smoothquant is None:
                 merge_qkv_scales(name, model, act_range, llama_qkv_para)
-            qkv = (0, saved_dir, infer_tp, ft_name,
-                   llama_qkv_para.get(
+            llama_qkv_para_replaced = llama_qkv_para.get(
                        name.replace(".weight", "").replace(
                            ".q_proj",
-                           ".qkv_proj")).cpu().numpy().astype(storage_type),
+                           ".qkv_proj"))
+            if llama_qkv_para_replaced.dtype == torch.bfloat16:
+                llama_qkv_para_replaced = llama_qkv_para_replaced.to(torch.float16)
+            qkv = (0, saved_dir, infer_tp, ft_name,
+                   llama_qkv_para_replaced.cpu().numpy().astype(storage_type),
                    act_range.get(
                        name.replace(".weight",
                                     "").replace(".q_proj", ".qkv_proj")), {
@@ -294,7 +302,7 @@ def hf_gpt_converter(args):
 
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method("spawn")
+    torch.multiprocessing.set_start_method("spawn", force=True)
 
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawTextHelpFormatter)
