@@ -74,7 +74,11 @@ def generate_int8(weights, act_range, is_qkv=False, multi_query_mode=False):
             scale_w_v.max(dim=0, keepdim=True)[0]
         ])
 
+        if scale_w_qkv_t.dtype == torch.bfloat16:
+            scale_w_qkv_t = scale_w_qkv_t.to(torch.float16)
         scale_w_orig_quant_t = 127. / scale_w_qkv_t.cpu().numpy()
+        if act_range["w"].dtype == torch.bfloat16:
+            act_range["w"] = act_range["w"].to(torch.float16)
         scale_w_orig_quant_c = 127. / act_range["w"].cpu().numpy()
     else:
         scale_w_orig_quant_t = 127. / act_range["w"].max().cpu().numpy()
