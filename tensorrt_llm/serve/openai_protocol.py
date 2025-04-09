@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated, Required, TypedDict
 
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
-from tensorrt_llm.llmapi import SamplingParams
+from tensorrt_llm.llmapi import SamplingParams, GuidedDecodingParams
 
 
 class OpenAIBaseModel(BaseModel):
@@ -44,9 +44,24 @@ class ModelList(OpenAIBaseModel):
     data: List[ModelCard] = Field(default_factory=list)
 
 
+class ResponseFormatJsonSchema(OpenAIBaseModel):
+    name: str
+    description: Optional[str] = None
+    schema_: Dict[str, Any] = Field(alias="schema")
+    strict: Optional[Literal[True]] = True
+
+
 class ResponseFormat(OpenAIBaseModel):
-    # type must be "json_object" or "text"
-    type: Literal["text", "json_object"]
+    type: Literal["text", "json_object", "json_schema"]
+    json_schema: ResponseFormatJsonSchema
+
+
+    # @model_validator(mode="before")
+    # @classmethod
+    # def check_schema(cls, data):
+    #     if data.get("schema") and :
+    #         raise ValueError("response_format must be json_schema to set schema")
+    #     return data
 
 
 class DisaggregatedParams(OpenAIBaseModel):
@@ -188,8 +203,7 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description=(
             "Similar to chat completion, this parameter specifies the format of "
-            "output. Only {'type': 'json_object'} or {'type': 'text' } is "
-            "supported."),
+            "output."),
     )
 
     disaggregated_params: Optional[DisaggregatedParams] = Field(
@@ -200,6 +214,7 @@ class CompletionRequest(OpenAIBaseModel):
     # doc: end-completion-extra-params
 
     def to_sampling_params(self) -> SamplingParams:
+        guided_decoding = _make_guided_decoding_params(self.response_format)
         sampling_params = SamplingParams(
             best_of=self.best_of,
             frequency_penalty=self.frequency_penalty,
@@ -231,6 +246,7 @@ class CompletionRequest(OpenAIBaseModel):
 
             # completion-extra-params
             add_special_tokens=self.add_special_tokens,
+            guided_decoding=guided_decoding,
         )
         return sampling_params
 
@@ -283,13 +299,6 @@ class CompletionRequest(OpenAIBaseModel):
         n = data.get("n")
         if best_of and n and best_of < n:
             raise ValueError("best_of should not be smaller than n")
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_response_format(cls, data):
-        if data.get("response_format"):
-            raise ValueError("response_format is not supported")
         return data
 
     @model_validator(mode="before")
@@ -523,7 +532,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(self) -> SamplingParams:
-
+        guided_decoding = _make_guided_decoding_params(self.response_format)
         sampling_params = SamplingParams(
             frequency_penalty=self.frequency_penalty,
             return_log_probs=self.logprobs,
@@ -554,6 +563,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
             # chat-completion-extra-params
             add_special_tokens=self.add_special_tokens,
+            guided_decoding=guided_decoding,
         )
         return sampling_params
 
@@ -612,13 +622,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_response_format(cls, data):
-        if data.get("response_format"):
-            raise ValueError("response_format is not supported")
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
     def check_suffix(cls, data):
         if data.get("suffix"):
             raise ValueError("suffix is not supported")
@@ -632,3 +635,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "special_tokens related settings are not supported")
         return data
+
+
+def _make_guided_decoding_params(response_format: Optional[ResponseFormat]) -> Optional[GuidedDecodingParams]:
+    guided_decoding_params = None
+    if response_format:
+        guided_decoding_params = GuidedDecodingParams()
+        if response_format.type == "json_object":
+            guided_decoding_params.json_object = True
+        elif response_format.type == "json_schema" and response_format.json_schema:
+            guided_decoding_params.json = response_format.json_schema.schema_
+        return guided_decoding_params
+    return guided_decoding_params
