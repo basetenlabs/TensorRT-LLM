@@ -1010,7 +1010,8 @@ void BlockManager::storeBlocks(std::vector<BlockKey> blockKeys, std::vector<KVCa
             // No match
             TLLM_LOG_DEBUG(
                 "BlockManager::storeBlocks - No match, inserting block %d into search structure", block->getBlockId());
-            needMatch = false; // no matching needed for following blocks
+            // pankaj: This was causing issue https://github.com/NVIDIA/TensorRT-LLM/issues/3543
+            // needMatch = false; // no matching needed for following blocks
             block->setBlockKey(blockKey, static_cast<SizeType32>(blockKey.uniqueTokens.size()) == mTokensPerBlock);
             block->setPrevBlock(searchRoot);
             block->setPrevBlockInSeq(searchRoot);
@@ -1036,7 +1037,10 @@ void BlockManager::storeBlocks(std::vector<BlockKey> blockKeys, std::vector<KVCa
     }
     if (mEventManager)
     {
-        mEventManager->enqueueStoredEvent(storedBlocks);
+        for (auto& block : storedBlocks)
+        {
+            mEventManager->enqueueStoredEvent({block});
+        }
     }
 }
 
