@@ -1,0 +1,14 @@
+baseten_benchmark --backend generic \
+  --api_url http://localhost:8080/v1/chat/completions \
+  --api_key none \
+  --model meta-llama/Llama-3.3-70B-Instruct \
+  --num_prompts 64 \
+  --concurrency 64 \
+  --random_input 8500 \
+  --output_len 300 \
+  --input_type custom \
+  --stream \
+  --tokenizer meta-llama/Llama-3.3-70B-Instruct \
+  --output_file latency.csv \
+  --warmup_requests 0 \
+  --prompt_style messages
