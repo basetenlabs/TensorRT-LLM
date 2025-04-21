@@ -1,0 +1,9 @@
+pytorch_backend_config:
+    use_cuda_graph: true
+    enable_overlap_scheduler: true
+enable_chunked_prefill: true
+kv_cache_config:
+  free_gpu_memory_fraction: 0.6
+speculative_config:
+    decoding_type: MTP
+    num_nextn_predict_layers: 3
