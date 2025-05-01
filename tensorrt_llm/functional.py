@@ -735,6 +735,7 @@ class AttentionMaskType(IntEnum):
     bidirectionalglm = 4  # TODO: merge this mask into bidirectional
     blocksparse = 5
     custom_mask = 6
+    chunked = 7
 
 
 class LayerNormType(IntEnum):

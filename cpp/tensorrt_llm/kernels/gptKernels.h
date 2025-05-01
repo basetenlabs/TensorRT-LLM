@@ -44,6 +44,8 @@ enum class AttentionMaskType
     BLOCKSPARSE = 5,
     // The custom mask input.
     CUSTOM_MASK = 6,
+    // For llama4
+    CHUNKED = 7,
 };
 
 enum class PositionEmbeddingType : int8_t

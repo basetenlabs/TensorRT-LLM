@@ -35,7 +35,9 @@ enum class TrtllmGenAttentionMaskType
     // Sliding window causal mask.
     SlidingWindowCausal,
     // Custom mask.
-    Custom
+    Custom,
+    // Chunked
+    Chunked
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -52,6 +54,7 @@ ATTENTION_MASK_TYPE_FUNCTION(Dense)
 ATTENTION_MASK_TYPE_FUNCTION(Causal)
 ATTENTION_MASK_TYPE_FUNCTION(SlidingWindowCausal)
 ATTENTION_MASK_TYPE_FUNCTION(Custom)
+ATTENTION_MASK_TYPE_FUNCTION(Chunked)
 
 #undef ATTENTION_MASK_TYPE_FUNCTION
 
@@ -285,6 +288,9 @@ struct TllmGenFmhaRunnerParams
             break;
         case 3: // tensorrt_llm::kernels::ContextAttentionMaskType::CUSTOM_MASK
             mMaskType = TrtllmGenAttentionMaskType::Custom;
+            break;
+        case 4: // tensorrt_llm::kernels::ContextAttentionMaskType::CHUNKED
+            mMaskType = TrtllmGenAttentionMaskType::Chunked;
             break;
         default:
             TLLM_THROW("ContextAttentionMaskType %d cannot be mapped to TrtllmGenAttentionMaskType",

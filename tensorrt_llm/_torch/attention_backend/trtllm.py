@@ -281,6 +281,8 @@ class TrtllmAttentionWrapper:
                 mask_type = AttentionMaskType.causal
             elif attention_mask == PredefinedAttentionMask.FULL:
                 mask_type = AttentionMaskType.padding
+            elif attention_mask == PredefinedAttentionMask.CHUNKED:
+                mask_type = AttentionMaskType.chunked
             else:
                 raise ValueError("Unexpected attention mask type")
         else:

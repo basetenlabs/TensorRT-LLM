@@ -70,7 +70,9 @@ enum class ContextAttentionMaskType
     // Only pay attention to [max(0, q_i - sliding_window_size), q_i]
     SLIDING_WINDOW_CAUSAL,
     // The custom mask input.
-    CUSTOM_MASK
+    CUSTOM_MASK,
+    // Chunked for llama4
+    CHUNKED
 };
 
 enum class AttentionInputLayout
@@ -158,6 +160,7 @@ struct MHARunnerFixedParams
         case ContextAttentionMaskType::CAUSAL: output += "causal"; break;
         case ContextAttentionMaskType::SLIDING_WINDOW_CAUSAL: output += "sliding_window_causal"; break;
         case ContextAttentionMaskType::CUSTOM_MASK: output += "custom_mask"; break;
+        case ContextAttentionMaskType::CHUNKED: output += "chunked"; break;
         default: output += std::to_string(static_cast<int>(attentionMaskType)) + " (unknown)"; break;
         }
 
@@ -220,6 +223,9 @@ struct MHARunnerFixedParams
             break;
         case 6: // tensorrt_llm::kernels::AttentionMaskType::CUSTOM_MASK
             attentionMaskType = ContextAttentionMaskType::CUSTOM_MASK;
+            break;
+        case 7: // tensorrt_llm::kernels::AttentionMaskType::CHUNKED
+            attentionMaskType = ContextAttentionMaskType::CHUNKED;
             break;
         default:
             TLLM_THROW("AttentionMaskType %d cannot be mapped to ContextAttentionMaskType", static_cast<int>(maskType));

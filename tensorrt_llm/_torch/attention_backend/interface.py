@@ -472,10 +472,12 @@ class PredefinedAttentionMask(str, Enum):
 
     Attributes:
         CAUSAL: Use causal mask.
-        FULL: do not use any mask
+        FULL: do not use any mask.
+        CHUNKED: llama4 attention mask.
     """
     CAUSAL = "causal"
     FULL = "full"
+    CHUNKED = "chunked"
 
 
 # May extend to custom attention mask type

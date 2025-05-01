@@ -160,6 +160,10 @@ __global__ void prepareAttentionMask(AttentionMaskParams<MaskDataType> params)
                 valid
                     = params.blockSparseParams.computeMask(row, col, qSeqLen, kvSeqLen, 1 /*num_heads*/, 0 /*head_id*/);
             }
+            else if constexpr (MaskType == AttentionMaskType::CHUNKED)
+            {
+                valid = row < qSeqLen && col < kvSeqLen && col <= row && row / params.attentionChunkSize == col / params.attentionChunkSize;
+            }
 
             // Store it to mask.
             params.mask[maskOffset + localMaskOffset] = static_cast<MaskDataType>(valid);
@@ -206,6 +210,10 @@ void invokeBuildAttentionMask(AttentionMaskParams<MaskDataType> const& params, c
     else if (params.attentionMaskType == AttentionMaskType::BLOCKSPARSE)
     {
         prepareAttentionMask<MaskDataType, AttentionMaskType::BLOCKSPARSE><<<grid, 256, 0, stream>>>(params);
+    }
+    else if (params.attentionMaskType == AttentionMaskType::CHUNKED)
+    {
+        prepareAttentionMask<MaskDataType, AttentionMaskType::CHUNKED><<<grid, 256, 0, stream>>>(params);
     }
     else
     {

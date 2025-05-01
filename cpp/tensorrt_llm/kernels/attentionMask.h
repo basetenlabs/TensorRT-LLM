@@ -56,6 +56,8 @@ struct AttentionMaskParams
     int maxKvSeqLen;
     // The sliding window size.
     int slidingWindowSize;
+    // The chunk size for chunked attention.
+    int attentionChunkSize;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

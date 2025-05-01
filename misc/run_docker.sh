@@ -1,8 +1,7 @@
-docker run -it --gpus all \
-  -it \
+docker run -d --gpus all \
   -v /dev/shm:/dev/shm \
-  -v ./extra-llm-api-config.yml:/extra-llm-api-config.yml \
+  -v $(pwd):/workspace/TensorRT-LLM \
   --network host \
   -p 8000:8000 \
-  baseten/tensorrt_llm-release:0.19.0rc0 \
-  /bin/bash
+  baseten/tensorrt_llm-release:v0.20.0rc1 \
+  tail -f /dev/null
