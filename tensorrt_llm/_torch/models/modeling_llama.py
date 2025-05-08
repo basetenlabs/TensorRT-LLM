@@ -353,6 +353,14 @@ class Llama4DecoderLayer(DecoderLayer):
         self.fusion_config.POST_MLP_FUSION = False
         self.attention_chunk_size = getattr(config, "attention_chunk_size",
                                             None)
+        
+        if config.no_rope_layers == []:
+            # We need to interleave rope/nope layers correctly
+            no_rope_layer_interval = 4
+            config.no_rope_layers = [
+                0 if (layer_idx % no_rope_layer_interval == 0) else 1 for layer_idx in range(self.num_hidden_layers)
+            ]
+        
         self.self_attn = Llama4Attention(
             model_config,
             layer_idx=layer_idx,
