@@ -12,6 +12,7 @@ from ..pyexecutor.llm_request import LlmRequest, LlmRequestState
 from ..pyexecutor.resource_manager import BaseResourceManager, SlotManager
 from ..pyexecutor.scheduler import ScheduledRequests
 from .interface import SpecConfig, SpecMetadata, SpeculativeDecodingMode
+import itertools
 
 
 @dataclass
@@ -248,6 +249,40 @@ class MTPDecoder(TorchDecoder):
         new_tokens_lens_device = model_outputs['new_tokens_lens']
         next_draft_tokens_device = model_outputs['next_draft_tokens']
         next_new_tokens_device = model_outputs['next_new_tokens']
+
+        ### BASETEN MTP-GUIDED SUPPORT BEGIN
+        logits = model_outputs['logits']
+
+        guided_decoding_mask = torch.zeros(next_draft_tokens_device.shape[0], device=next_draft_tokens_device.device)
+        guided_decoding_indices = []
+        cur_logits_idx = 0
+        next_logits_idx = 0
+        for i, request in enumerate(itertools.chain(scheduled_requests.context_requests, scheduled_requests.generation_requests)):
+            # TODO(mahmoud, perf): build guided_decoding_mask and guided_decoding_indices in self.update_requests?
+            cur_logits_idx = next_logits_idx
+            next_logits_idx += 1 + request.num_draft_tokens
+            if request.guided_decoding_params is not None:
+                guided_decoding_mask[i] = 1
+                guided_decoding_indices.append(cur_logits_idx)
+
+        new_tokens_greedy_device = torch.argmax(logits[guided_decoding_indices], dim=-1)
+
+        if len(guided_decoding_indices) > 0:
+            cpy_new_tokens = new_tokens_device.clone()
+            cpy_new_tokens[:, 0] = new_tokens_device[:, 0] * (1 - guided_decoding_mask) + new_tokens_greedy_device * guided_decoding_mask
+            new_tokens_device = cpy_new_tokens
+
+            cpy_next_new_tokens = next_new_tokens_device.clone()
+            cpy_next_new_tokens[:, 0] = cpy_next_new_tokens[:, 0] * (1 - guided_decoding_mask) + new_tokens_greedy_device * guided_decoding_mask
+            next_new_tokens_device = cpy_next_new_tokens
+
+            # set lens to 1 for these
+            cpy_lens = new_tokens_lens_device.clone()
+            cpy_lens[:] = cpy_lens * (1 - guided_decoding_mask) + 1 * guided_decoding_mask
+            new_tokens_lens_device = cpy_lens
+        
+        ### BASETEN MTP-GUIDED SUPPORT END
+
         new_tokens_host = new_tokens_device.to('cpu', non_blocking=True)
         new_tokens_lens_host = new_tokens_lens_device.to('cpu',
                                                          non_blocking=True)
