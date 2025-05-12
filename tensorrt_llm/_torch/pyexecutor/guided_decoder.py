@@ -4,7 +4,6 @@ from typing import List, Optional
 
 import torch
 import xgrammar
-import json
 
 from ...bindings.executor import GuidedDecodingConfig, GuidedDecodingParams
 from .llm_request import LlmRequest
