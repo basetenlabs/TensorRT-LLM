@@ -131,21 +131,28 @@ class GuidedDecoder:
     def execute(self, scheduled_requests: ScheduledRequests,
                 logits: torch.Tensor,
                 resource_manager: GuidedDecoderResourceManager) -> None:
-        assert logits.size(0) == len(scheduled_requests.context_requests) + len(
-            scheduled_requests.generation_requests)
+        # [BASETEN] the following assert was uncommented to support with MTP
+        # assert logits.size(0) == len(scheduled_requests.context_requests) + len(
+        #    scheduled_requests.generation_requests)
         torch.cuda.current_stream().wait_stream(self._stream)
 
         if self.guided_decoding_backend == GuidedDecodingConfig.GuidedDecodingBackend.XGRAMMAR:
             batched_logits, batched_bitmask = [], []
-            for i, llm_req in enumerate(
+            cur_logits_idx = 0
+            next_logits_idx = 0
+            for _, llm_req in enumerate(
                     itertools.chain(scheduled_requests.context_requests,
                                     scheduled_requests.generation_requests)):
+                cur_logits_idx = next_logits_idx
+                next_logits_idx += 1 + llm_req.num_draft_tokens
                 if llm_req.guided_decoding_params is None:
                     continue
                 if llm_req.is_context_init_state and not llm_req.is_last_context_chunk(
                 ):
                     continue
-                batched_logits.append(logits[i])
+
+                # [BASETEN] adjust the indices to work with MTP (cur_logits_idx, next_logits_idx vs i)
+                batched_logits.append(logits[cur_logits_idx])
                 slot = resource_manager.slot_manager.get_slot(
                     llm_req.request_id)
                 batched_bitmask.append(self.bitmask[slot])
