@@ -265,23 +265,24 @@ class MTPDecoder(TorchDecoder):
             elif sampling_type == "temperature":
                 if (hasattr(request, 'sampling_config') and 
                     request.sampling_config.temperature is not None and
-                    request.sampling_config.temperature > 0):
+                    request.sampling_config.temperature[0] > 0):
                     mask[i] = 1
                     indices.append(cur_logits_idx)
-                    values.append(request.sampling_config.temperature)
+                    values.append(request.sampling_config.temperature[0] + 1e-6)
             elif sampling_type == "topk":
                 if (hasattr(request, 'sampling_config') and 
-                    request.sampling_config.top_k is not None):
+                    request.sampling_config.top_k is not None
+                    and request.sampling_config.top_k[0] > 0):
                     mask[i] = 1
                     indices.append(cur_logits_idx)
                     values.append(request.sampling_config.top_k[0])
             elif sampling_type == "topp":
                 if (hasattr(request, 'sampling_config') and 
-                    request.sampling_config.top_p is not None and
-                    request.sampling_config.top_p > 0):
+                    request.sampling_config.top_p is not None
+                    and request.sampling_config.top_p[0] > 0):
                     mask[i] = 1
                     indices.append(cur_logits_idx)
-                    values.append(request.sampling_config.top_p)
+                    values.append(request.sampling_config.top_p[0])
 
         return mask, indices, values
 
@@ -346,7 +347,7 @@ class MTPDecoder(TorchDecoder):
                                             dtype=logits_temperature.dtype)
             temperature_tensor = temperature_tensor.unsqueeze(-1)
             probs = torch.softmax(logits_temperature / temperature_tensor, dim=-1)
-            new_tokens_temperature_device = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            new_tokens_temperature_device = torch.multinomial(probs, num_samples=1).squeeze(-1).to(new_tokens_device.dtype)
             
             new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_sampling_mask(
                 new_tokens_device, new_tokens_lens_device, next_new_tokens_device,
@@ -371,7 +372,8 @@ class MTPDecoder(TorchDecoder):
         if len(topk_indices) > 0:
             logits_topk = logits[topk_indices]
             for i in range(len(topk_indices)):
-                topk_logprobs, topk_indices = torch.topk(logits_topk[i], topk_values[i], dim=-1)
+                k = min(topk_values[i], logits_topk[i].shape[-1])
+                topk_logprobs, topk_indices = torch.topk(logits_topk[i], k, dim=-1)
                 probs = torch.nn.functional.softmax(topk_logprobs, dim=-1)
                 sample_idx = torch.multinomial(probs, num_samples=1).item()
                 new_tokens_topk_device[i] = topk_indices[sample_idx]
@@ -404,7 +406,7 @@ class MTPDecoder(TorchDecoder):
             sorted_probs[~nucleus_mask] = 0
             sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
             new_tokens_topp_device = torch.multinomial(sorted_probs, num_samples=1).squeeze(-1)
-            new_tokens_topp_device = torch.gather(sorted_indices, -1, new_tokens_topp_device.unsqueeze(-1)).squeeze(-1)
+            new_tokens_topp_device = torch.gather(sorted_indices, -1, new_tokens_topp_device.unsqueeze(-1)).squeeze(-1).to(new_tokens_device.dtype)
             
             new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_sampling_mask(
                 new_tokens_device, new_tokens_lens_device, next_new_tokens_device,
@@ -419,17 +421,19 @@ class MTPDecoder(TorchDecoder):
         next_draft_tokens_device = model_outputs['next_draft_tokens']
         next_new_tokens_device = model_outputs['next_new_tokens']
 
+        torch.manual_seed(1)
+
         new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_temperature_sampling(
             scheduled_requests, model_outputs, new_tokens_device, 
             new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
 
-        new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_topk_sampling(
-            scheduled_requests, model_outputs, new_tokens_device,
-            new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
+        # new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_topk_sampling(
+        #     scheduled_requests, model_outputs, new_tokens_device,
+        #     new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
 
-        new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_topp_sampling(
-            scheduled_requests, model_outputs, new_tokens_device,
-            new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
+        # new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_topp_sampling(
+        #     scheduled_requests, model_outputs, new_tokens_device,
+        #     new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
 
         new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_guided_decoding(
             scheduled_requests, model_outputs, new_tokens_device, 
