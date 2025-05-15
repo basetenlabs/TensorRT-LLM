@@ -183,6 +183,8 @@ class MTPDecoder(TorchDecoder):
         self.mapping = None
         self.draft_len = config.num_nextn_predict_layers
 
+        torch.manual_seed(0)
+
     def _draft_meet_max_token_stop_criteria(self, request: LlmRequest,
                                             num_tokens: int, beam_idx: int):
         if self._meet_max_token_stop_criteria(request,
@@ -253,43 +255,43 @@ class MTPDecoder(TorchDecoder):
         ### BASETEN MTP-GUIDED SUPPORT BEGIN
         logits = model_outputs['logits']
 
-        guided_decoding_mask = torch.zeros(
+        no_mtp_mask = torch.zeros(
             next_draft_tokens_device.shape[0],
             device=next_draft_tokens_device.device)
-        guided_decoding_indices = []
+        no_mtp_indices = []
+        temperatures = []
         cur_logits_idx = 0
         next_logits_idx = 0
         for i, request in enumerate(
                 itertools.chain(scheduled_requests.context_requests,
                                 scheduled_requests.generation_requests)):
-            # TODO(mahmoud, perf): build guided_decoding_mask and guided_decoding_indices in self.update_requests?
+            # TODO(mahmoud, perf): build no_mtp_mask and no_mtp_indices in self.update_requests?
             cur_logits_idx = next_logits_idx
             next_logits_idx += 1 + request.num_draft_tokens
-            if request.guided_decoding_params is not None:
-                guided_decoding_mask[i] = 1
-                guided_decoding_indices.append(cur_logits_idx)
+            if request.guided_decoding_params is not None or request.sampling_config.temperature is not None:
+                no_mtp_mask[i] = 1
+                no_mtp_indices.append(cur_logits_idx)
+                temperatures.append(request.sampling_config.temperature[0] + 1e-6 if request.sampling_config.temperature is not None else 1e-6)
+        temperatures = torch.tensor(temperatures, device=logits.device)
 
-        if len(guided_decoding_indices) > 0:
+        if len(no_mtp_indices) > 0:
             # MTP decoding uses next_new_tokens_device (from the MTP worker) to get the next token.
-            # For guided decoding, we need to use greedy sampling on the logits instead.
-            new_tokens_greedy_device = torch.argmax(
-                logits[guided_decoding_indices], dim=-1)
+            # For special sampling, we need to discard the MTP tokens and use greedy sampling on the logits instead.
+            probs = torch.softmax(logits[no_mtp_indices,:] / temperatures.unsqueeze(-1), dim=-1)
+            no_mtp_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
+
             cpy_new_tokens = new_tokens_device.clone()
             cpy_new_tokens[:, 0] = new_tokens_device[:, 0] * (
-                1 - guided_decoding_mask
-            ) + new_tokens_greedy_device * guided_decoding_mask
+                1 - no_mtp_mask
+            ) + no_mtp_tokens * no_mtp_mask
             new_tokens_device = cpy_new_tokens
 
-            cpy_next_new_tokens = next_new_tokens_device.clone()
-            cpy_next_new_tokens[:, 0] = cpy_next_new_tokens[:, 0] * (
-                1 - guided_decoding_mask
-            ) + new_tokens_greedy_device * guided_decoding_mask
-            next_new_tokens_device = cpy_next_new_tokens
+            next_new_tokens_device = cpy_new_tokens
 
             # set lens to 1 for these
             cpy_lens = new_tokens_lens_device.clone()
             cpy_lens[:] = cpy_lens * (
-                1 - guided_decoding_mask) + 1 * guided_decoding_mask
+                1 - no_mtp_mask) + 1 * no_mtp_mask
             new_tokens_lens_device = cpy_lens
 
         ### BASETEN MTP-GUIDED SUPPORT END
