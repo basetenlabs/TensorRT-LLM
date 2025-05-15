@@ -77,12 +77,14 @@ class EarlyStopDecoder(Decoder):
             request.context_logits = decoder_state.logits[idx]
 
 
-def top_k_sampling_batch(logits, top_k=50):
+def top_k_sampling_batch(logits, top_k: int, temperature: float, seed: int):
     logits_dim = logits.dim()
     if logits_dim == 1:
         logits = logits.unsqueeze(0)
     # logits should be 2D ：[batch_size, vocab_size]
     batch_size, vocab_size = logits.size()
+
+    logits = logits / temperature
 
     raw_probs = torch.softmax(logits, dim=-1)
 
@@ -98,6 +100,7 @@ def top_k_sampling_batch(logits, top_k=50):
     probs = torch.softmax(logits, dim=-1)
 
     # sample from the distribution and generate result of [batch_size, 1]
+    torch.cuda.manual_seed_all(seed)
     next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
     token_probs = torch.gather(raw_probs, dim=1,
                                index=next_tokens.unsqueeze(1)).squeeze(-1)
@@ -105,12 +108,14 @@ def top_k_sampling_batch(logits, top_k=50):
     return next_tokens, log_probs
 
 
-def top_p_sampling_batch(logits, top_p=0.9):
+def top_p_sampling_batch(logits, top_p: float, temperature: float, seed: int):
     logits_dim = logits.dim()
     if logits_dim == 1:
         logits = logits.unsqueeze(0)
     # logits should be 2D ：[batch_size, vocab_size]
     batch_size, vocab_size = logits.size()
+
+    logits = logits / temperature
 
     raw_probs = torch.softmax(logits, dim=-1)
 
@@ -135,6 +140,7 @@ def top_p_sampling_batch(logits, top_p=0.9):
     probs = torch.softmax(logits, dim=-1)
 
     # sample from the distribution and generate result of [batch_size, 1]
+    torch.cuda.manual_seed_all(seed)
     next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
     token_probs = torch.gather(raw_probs, dim=1,
                                index=next_tokens.unsqueeze(1)).squeeze(-1)
@@ -154,14 +160,36 @@ def greedy_search_sampling_batch(logits):
 def decode_single_request(request: LlmRequest, logits):
     assert logits.dim(
     ) == 2 and logits.shape[0] == 1, "logits should have shape [1, vocab_size]"
-    if request.sampling_config.top_p is not None and len(
-            request.sampling_config.top_p) > 0:
-        next_tokens, log_probs = top_p_sampling_batch(
-            logits, request.sampling_config.top_p[0])
-    elif request.sampling_config.top_k is not None and len(
-            request.sampling_config.top_k) > 0:
-        next_tokens, log_probs = top_k_sampling_batch(
-            logits, request.sampling_config.top_k[0])
+    top_p = (
+        request.sampling_config.top_p[0]
+        if request.sampling_config.top_p is not None
+        and len(request.sampling_config.top_p) > 0
+        else None
+    )
+    top_k = (
+        request.sampling_config.top_k[0]
+        if request.sampling_config.top_k is not None
+        and len(request.sampling_config.top_k) > 0
+        else None
+    )
+    temperature = (
+        request.sampling_config.temperature[0]
+        if request.sampling_config.temperature is not None
+        and len(request.sampling_config.temperature) > 0
+        else None
+    )
+    random_seed = (
+        request.sampling_config.random_seed[0]
+        if request.sampling_config.random_seed is not None
+        and len(request.sampling_config.random_seed) > 0
+        else None
+    )
+    if (temperature == 0):
+        next_tokens, log_probs = greedy_search_sampling_batch(logits)
+    elif (top_p is not None):
+        next_tokens, log_probs = top_p_sampling_batch(logits, top_p, temperature or 1.0, random_seed or 0)
+    elif (top_k is not None):
+        next_tokens, log_probs = top_k_sampling_batch(logits, top_k, temperature or 1.0, random_seed or 0)
     else:
         next_tokens, log_probs = greedy_search_sampling_batch(logits)
     # TODO: enable these lines when log_probs is needed
