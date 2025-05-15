@@ -239,60 +239,199 @@ class MTPDecoder(TorchDecoder):
                 request.py_decoding_iter += 1
             idx += 1
 
+    def _create_sampling_mask_and_indices(self, scheduled_requests: ScheduledRequests,
+                                        next_draft_tokens_device: torch.Tensor,
+                                        sampling_type: str) -> tuple:
+        """Create sampling mask and indices for different sampling methods."""
+        mask = torch.zeros(
+            next_draft_tokens_device.shape[0],
+            device=next_draft_tokens_device.device)
+        indices = []
+        values = []
+        cur_logits_idx = 0
+        next_logits_idx = 0
+
+        for i, request in enumerate(
+                itertools.chain(scheduled_requests.context_requests,
+                                scheduled_requests.generation_requests)):
+            cur_logits_idx = next_logits_idx
+            next_logits_idx += 1 + request.num_draft_tokens
+
+            if sampling_type == "guided":
+                if request.guided_decoding_params is not None:
+                    mask[i] = 1
+                    indices.append(cur_logits_idx)
+            elif sampling_type == "temperature":
+                if (hasattr(request, 'sampling_config') and 
+                    request.sampling_config.temperature > 0):
+                    mask[i] = 1
+                    indices.append(cur_logits_idx)
+                    values.append(request.sampling_config.temperature)
+            elif sampling_type == "topk":
+                if (hasattr(request, 'sampling_config') and 
+                    request.sampling_config.top_k > 0):
+                    mask[i] = 1
+                    indices.append(cur_logits_idx)
+                    values.append(request.sampling_config.top_k)
+            elif sampling_type == "topp":
+                if (hasattr(request, 'sampling_config') and 
+                    request.sampling_config.top_p > 0):
+                    mask[i] = 1
+                    indices.append(cur_logits_idx)
+                    values.append(request.sampling_config.top_p)
+
+        return mask, indices, values
+
+    def _apply_sampling_mask(self, new_tokens_device: torch.Tensor,
+                            new_tokens_lens_device: torch.Tensor,
+                            next_new_tokens_device: torch.Tensor,
+                            mask: torch.Tensor,
+                            sampled_tokens: torch.Tensor) -> tuple:
+        """Apply sampling mask to update token tensors."""
+        cpy_new_tokens = new_tokens_device.clone()
+        cpy_new_tokens[:, 0] = new_tokens_device[:, 0] * (
+            1 - mask) + sampled_tokens * mask
+        new_tokens_device = cpy_new_tokens
+
+        cpy_next_new_tokens = next_new_tokens_device.clone()
+        cpy_next_new_tokens[:, 0] = cpy_next_new_tokens[:, 0] * (
+            1 - mask) + sampled_tokens * mask
+        next_new_tokens_device = cpy_next_new_tokens
+
+        cpy_lens = new_tokens_lens_device.clone()
+        cpy_lens[:] = cpy_lens * (1 - mask) + 1 * mask
+        new_tokens_lens_device = cpy_lens
+
+        return new_tokens_device, new_tokens_lens_device, next_new_tokens_device
+
+    def _apply_guided_decoding(self, scheduled_requests: ScheduledRequests,
+                              model_outputs: dict,
+                              new_tokens_device: torch.Tensor,
+                              new_tokens_lens_device: torch.Tensor,
+                              next_draft_tokens_device: torch.Tensor,
+                              next_new_tokens_device: torch.Tensor) -> tuple:
+        """Apply greedy sampling for guided decoding requests."""
+        logits = model_outputs['logits']
+        
+        guided_decoding_mask, guided_decoding_indices, _ = self._create_sampling_mask_and_indices(
+            scheduled_requests, next_draft_tokens_device, "guided")
+
+        if len(guided_decoding_indices) > 0:
+            new_tokens_greedy_device = torch.argmax(
+                logits[guided_decoding_indices], dim=-1)
+            
+            new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_sampling_mask(
+                new_tokens_device, new_tokens_lens_device, next_new_tokens_device,
+                guided_decoding_mask, new_tokens_greedy_device)
+
+        return new_tokens_device, new_tokens_lens_device, next_new_tokens_device
+
+    def _apply_temperature_sampling(self, scheduled_requests: ScheduledRequests,
+                                   model_outputs: dict,
+                                   new_tokens_device: torch.Tensor,
+                                   new_tokens_lens_device: torch.Tensor,
+                                   next_draft_tokens_device: torch.Tensor,
+                                   next_new_tokens_device: torch.Tensor) -> tuple:
+        """Apply temperature sampling for requests with temperature > 0."""
+        logits = model_outputs['logits']
+        
+        temperature_mask, temperature_indices, temperatures = self._create_sampling_mask_and_indices(
+            scheduled_requests, next_draft_tokens_device, "temperature")
+
+        if len(temperature_indices) > 0:
+            logits_temperature = logits[temperature_indices]
+            temperature_tensor = torch.tensor(temperatures, 
+                                            device=logits_temperature.device,
+                                            dtype=logits_temperature.dtype)
+            temperature_tensor = temperature_tensor.unsqueeze(-1)
+            probs = torch.softmax(logits_temperature / temperature_tensor, dim=-1)
+            new_tokens_temperature_device = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            
+            new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_sampling_mask(
+                new_tokens_device, new_tokens_lens_device, next_new_tokens_device,
+                temperature_mask, new_tokens_temperature_device)
+
+        return new_tokens_device, new_tokens_lens_device, next_new_tokens_device
+
+    def _apply_topk_sampling(self, scheduled_requests: ScheduledRequests,
+                            model_outputs: dict,
+                            new_tokens_device: torch.Tensor,
+                            new_tokens_lens_device: torch.Tensor,
+                            next_draft_tokens_device: torch.Tensor,
+                            next_new_tokens_device: torch.Tensor) -> tuple:
+        """Apply top-k sampling for requests with top_k > 0."""
+        logits = model_outputs['logits']
+        
+        topk_mask, topk_indices, topk_values = self._create_sampling_mask_and_indices(
+            scheduled_requests, next_draft_tokens_device, "topk")
+
+        if len(topk_indices) > 0:
+            logits_topk = logits[topk_indices]
+            values, _ = torch.topk(logits_topk, max(topk_values), dim=-1)
+            probs = torch.softmax(logits_topk, dim=-1)
+            for i, k in enumerate(topk_values):
+                probs[i][probs[i] < values[i][k-1]] = 0
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+            new_tokens_topk_device = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            
+            new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_sampling_mask(
+                new_tokens_device, new_tokens_lens_device, next_new_tokens_device,
+                topk_mask, new_tokens_topk_device)
+
+        return new_tokens_device, new_tokens_lens_device, next_new_tokens_device
+
+    def _apply_topp_sampling(self, scheduled_requests: ScheduledRequests,
+                            model_outputs: dict,
+                            new_tokens_device: torch.Tensor,
+                            new_tokens_lens_device: torch.Tensor,
+                            next_draft_tokens_device: torch.Tensor,
+                            next_new_tokens_device: torch.Tensor) -> tuple:
+        """Apply top-p (nucleus) sampling for requests with top_p > 0."""
+        logits = model_outputs['logits']
+        
+        topp_mask, topp_indices, topp_values = self._create_sampling_mask_and_indices(
+            scheduled_requests, next_draft_tokens_device, "topp")
+
+        if len(topp_indices) > 0:
+            logits_topp = logits[topp_indices]
+            probs = torch.softmax(logits_topp, dim=-1)
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+            cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
+            nucleus_mask = cumsum_probs <= torch.tensor(topp_values, device=probs.device).unsqueeze(-1)
+            nucleus_mask = torch.cat([nucleus_mask.new_ones(nucleus_mask.shape[:-1] + (1,)), nucleus_mask[..., :-1]], dim=-1)
+            sorted_probs[~nucleus_mask] = 0
+            sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+            new_tokens_topp_device = torch.multinomial(sorted_probs, num_samples=1).squeeze(-1)
+            new_tokens_topp_device = torch.gather(sorted_indices, -1, new_tokens_topp_device.unsqueeze(-1)).squeeze(-1)
+            
+            new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_sampling_mask(
+                new_tokens_device, new_tokens_lens_device, next_new_tokens_device,
+                topp_mask, new_tokens_topp_device)
+
+        return new_tokens_device, new_tokens_lens_device, next_new_tokens_device
+
     def decode_async(self, scheduled_requests: ScheduledRequests,
                      model_outputs) -> DecoderState:
-        # new_tokens_device: all of the accepted tokens, device tensor
-        # new_tokens_lens_device: the accepted lengths, device tensor
-        # next_draft_tokens_device: predicted draft tokens, device tensor
-        # next_new_tokens_device: input tokens for the next iteration, device tensor
         new_tokens_device = model_outputs['new_tokens']
         new_tokens_lens_device = model_outputs['new_tokens_lens']
         next_draft_tokens_device = model_outputs['next_draft_tokens']
         next_new_tokens_device = model_outputs['next_new_tokens']
 
-        ### BASETEN MTP-GUIDED SUPPORT BEGIN
-        logits = model_outputs['logits']
+        new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_temperature_sampling(
+            scheduled_requests, model_outputs, new_tokens_device, 
+            new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
 
-        guided_decoding_mask = torch.zeros(
-            next_draft_tokens_device.shape[0],
-            device=next_draft_tokens_device.device)
-        guided_decoding_indices = []
-        cur_logits_idx = 0
-        next_logits_idx = 0
-        for i, request in enumerate(
-                itertools.chain(scheduled_requests.context_requests,
-                                scheduled_requests.generation_requests)):
-            # TODO(mahmoud, perf): build guided_decoding_mask and guided_decoding_indices in self.update_requests?
-            cur_logits_idx = next_logits_idx
-            next_logits_idx += 1 + request.num_draft_tokens
-            if request.guided_decoding_params is not None:
-                guided_decoding_mask[i] = 1
-                guided_decoding_indices.append(cur_logits_idx)
+        new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_topk_sampling(
+            scheduled_requests, model_outputs, new_tokens_device,
+            new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
 
-        if len(guided_decoding_indices) > 0:
-            # MTP decoding uses next_new_tokens_device (from the MTP worker) to get the next token.
-            # For guided decoding, we need to use greedy sampling on the logits instead.
-            new_tokens_greedy_device = torch.argmax(
-                logits[guided_decoding_indices], dim=-1)
-            cpy_new_tokens = new_tokens_device.clone()
-            cpy_new_tokens[:, 0] = new_tokens_device[:, 0] * (
-                1 - guided_decoding_mask
-            ) + new_tokens_greedy_device * guided_decoding_mask
-            new_tokens_device = cpy_new_tokens
+        new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_topp_sampling(
+            scheduled_requests, model_outputs, new_tokens_device,
+            new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
 
-            cpy_next_new_tokens = next_new_tokens_device.clone()
-            cpy_next_new_tokens[:, 0] = cpy_next_new_tokens[:, 0] * (
-                1 - guided_decoding_mask
-            ) + new_tokens_greedy_device * guided_decoding_mask
-            next_new_tokens_device = cpy_next_new_tokens
-
-            # set lens to 1 for these
-            cpy_lens = new_tokens_lens_device.clone()
-            cpy_lens[:] = cpy_lens * (
-                1 - guided_decoding_mask) + 1 * guided_decoding_mask
-            new_tokens_lens_device = cpy_lens
-
-        ### BASETEN MTP-GUIDED SUPPORT END
+        new_tokens_device, new_tokens_lens_device, next_new_tokens_device = self._apply_guided_decoding(
+            scheduled_requests, model_outputs, new_tokens_device, 
+            new_tokens_lens_device, next_draft_tokens_device, next_new_tokens_device)
 
         new_tokens_host = new_tokens_device.to('cpu', non_blocking=True)
         new_tokens_lens_host = new_tokens_lens_device.to('cpu',
