@@ -14,6 +14,8 @@ from ..pyexecutor.resource_manager import BaseResourceManager, SlotManager
 from ..pyexecutor.scheduler import ScheduledRequests
 from .interface import SpecConfig, SpecMetadata, SpeculativeDecodingMode
 
+import flashinfer
+
 
 @dataclass
 class MTPConfig(SpecConfig):
@@ -183,7 +185,7 @@ class MTPDecoder(TorchDecoder):
         self.mapping = None
         self.draft_len = config.num_nextn_predict_layers
 
-        torch.manual_seed(0)
+        torch.manual_seed(42)
 
     def _draft_meet_max_token_stop_criteria(self, request: LlmRequest,
                                             num_tokens: int, beam_idx: int):
@@ -240,6 +242,109 @@ class MTPDecoder(TorchDecoder):
                 request.py_rewind_len = self.draft_len - (num_new_tokens - 1)
                 request.py_decoding_iter += 1
             idx += 1
+    
+    def setup_decoder(self, scheduled_requests: ScheduledRequests, model_outputs):
+        torch.manual_seed(42)
+        self._b10_fill_custom_requests(scheduled_requests, model_outputs["logits"].shape[1], model_outputs["logits"].device)
+        
+    def _b10_fill_custom_requests(self, scheduled_requests: ScheduledRequests, vocab_size: int, device: torch.device):
+        logits_idx = []
+        request_idx = []
+
+        temperature_idx = []
+        temperature = []
+
+        top_p_req_idx = []
+        top_p_vals = []
+
+        top_k_req_idx = []
+        top_k_vals = []
+        
+        cur_idx = 0
+        next_idx = 0
+        for i, request in enumerate(itertools.chain(scheduled_requests.context_requests,
+                                scheduled_requests.generation_requests)):
+            cur_idx = next_idx
+            next_idx += 1 + request.num_draft_tokens
+            is_custom = False
+
+            if (request.sampling_config.temperature is not None and
+                request.sampling_config.temperature[0] >= 0 and request.sampling_config.temperature[0] < 1):
+                assert len(request.sampling_config.temperature) == 1
+                temperature_idx.append(len(logits_idx))
+                temperature.append(request.sampling_config.temperature[0] + 1e-6)
+                is_custom = True
+            
+            if request.sampling_config.top_p is not None and request.sampling_config.top_p[0] > 0 and request.sampling_config.top_p[0] < 1:
+                assert len(request.sampling_config.top_p) == 1
+                top_p_req_idx.append(len(logits_idx))
+                top_p_vals.append(request.sampling_config.top_p[0])
+                is_custom = True
+
+            if request.sampling_config.top_k is not None and request.sampling_config.top_k[0] > 0 and request.sampling_config.top_k[0] < vocab_size:
+                assert len(request.sampling_config.top_k) == 1
+                top_k_req_idx.append(len(logits_idx))
+                top_k_vals.append(min(request.sampling_config.top_k[0], vocab_size))
+                is_custom = True
+
+            if is_custom:
+                logits_idx.append(cur_idx)
+                request_idx.append(i)
+    
+        self.request_idx = []
+        self.logits_idx = []
+        self.temperature = []
+        self.top_p = []
+        self.top_k = []
+
+        top_p = torch.ones((len(logits_idx),), device=device, dtype=torch.float32)
+        top_k = torch.full((len(logits_idx),), 1, device=device, dtype=torch.int32)
+
+        top_p[top_p_req_idx] = torch.tensor(top_p_vals, device=device, dtype=top_p.dtype)
+        top_k[top_k_req_idx] = torch.tensor(top_k_vals, device=device, dtype=top_k.dtype)
+
+        self.request_idx = request_idx
+        self.logits_idx = logits_idx
+        self.temperature_idx = temperature_idx
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+
+
+    # returns request_idx, sampled_tokens for requests that require
+    # temperature, top_k, and/or top_p
+    def _b10_batch_decode(self, scheduled_requests: ScheduledRequests,
+                                model_outputs) -> List[LlmRequest]:
+
+        request_idx = self.request_idx
+        logits_idx = self.logits_idx
+        temperature_idx = self.temperature_idx
+        temperature = self.temperature
+        top_p = self.top_p
+        top_k = self.top_k
+
+        if len(request_idx) == 0:
+            return [], []
+
+        logits = model_outputs['logits']
+
+        logits = logits[logits_idx, :]
+        assert logits.dim() == 2
+        assert len(logits_idx) == len(request_idx)
+    
+        # Apply temperature
+        if len(temperature_idx) > 0:
+            logits[temperature_idx, :] /= torch.tensor(temperature, device=logits.device, dtype=logits.dtype).unsqueeze(1)
+        
+        # print(f"logits: {logits.shape}")
+        # print(f"top_k: {top_k.shape}")
+        # print(f"top_p: {top_p.shape}")
+        # print(f"request_idx: {request_idx}")
+        # print(f"logits_idx: {logits_idx}")
+        sampled_tokens = flashinfer.top_k_top_p_sampling_from_logits(logits.to(torch.float32), top_k, top_p)
+        
+        return request_idx, sampled_tokens
+        
 
     def decode_async(self, scheduled_requests: ScheduledRequests,
                      model_outputs) -> DecoderState:
@@ -253,45 +358,21 @@ class MTPDecoder(TorchDecoder):
         next_new_tokens_device = model_outputs['next_new_tokens']
 
         ### BASETEN MTP-GUIDED SUPPORT BEGIN
-        logits = model_outputs['logits']
-
-        no_mtp_mask = torch.zeros(
-            next_draft_tokens_device.shape[0],
-            device=next_draft_tokens_device.device)
-        no_mtp_indices = []
-        temperatures = []
-        cur_logits_idx = 0
-        next_logits_idx = 0
-        for i, request in enumerate(
-                itertools.chain(scheduled_requests.context_requests,
-                                scheduled_requests.generation_requests)):
-            # TODO(mahmoud, perf): build no_mtp_mask and no_mtp_indices in self.update_requests?
-            cur_logits_idx = next_logits_idx
-            next_logits_idx += 1 + request.num_draft_tokens
-            if request.guided_decoding_params is not None or request.sampling_config.temperature is not None:
-                no_mtp_mask[i] = 1
-                no_mtp_indices.append(cur_logits_idx)
-                temperatures.append(request.sampling_config.temperature[0] + 1e-6 if request.sampling_config.temperature is not None else 1e-6)
-        temperatures = torch.tensor(temperatures, device=logits.device)
-
-        if len(no_mtp_indices) > 0:
-            # MTP decoding uses next_new_tokens_device (from the MTP worker) to get the next token.
-            # For special sampling, we need to discard the MTP tokens and use greedy sampling on the logits instead.
-            probs = torch.softmax(logits[no_mtp_indices,:] / temperatures.unsqueeze(-1), dim=-1)
-            no_mtp_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
-
+        request_idx, sampled_tokens = self._b10_batch_decode(scheduled_requests, model_outputs)
+        if len(request_idx) > 0:
             cpy_new_tokens = new_tokens_device.clone()
-            cpy_new_tokens[:, 0] = new_tokens_device[:, 0] * (
-                1 - no_mtp_mask
-            ) + no_mtp_tokens * no_mtp_mask
+            cpy_new_tokens[request_idx, 0] = sampled_tokens
+            cpy_new_tokens[request_idx, 1:] = 0
             new_tokens_device = cpy_new_tokens
 
-            next_new_tokens_device = cpy_new_tokens
+            cpy_next_new_tokens = next_new_tokens_device.clone()
+            cpy_next_new_tokens[request_idx, 0] = sampled_tokens
+            cpy_next_new_tokens[request_idx, 1:] = 0
+            next_new_tokens_device = cpy_next_new_tokens
 
-            # set lens to 1 for these
+            # set lens to 1 (disable MTP for custom requests)
             cpy_lens = new_tokens_lens_device.clone()
-            cpy_lens[:] = cpy_lens * (
-                1 - no_mtp_mask) + 1 * no_mtp_mask
+            cpy_lens[request_idx] = 1
             new_tokens_lens_device = cpy_lens
 
         ### BASETEN MTP-GUIDED SUPPORT END
