@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+import flashinfer
 
 from tensorrt_llm._utils import torch_dtype_to_binding
 from tensorrt_llm.bindings import (DataType, ModelConfig, WorldConfig,
@@ -145,6 +146,32 @@ def top_p_sampling_batch(logits, top_p: float, temperature: float, seed: int):
     token_probs = torch.gather(raw_probs, dim=1,
                                index=next_tokens.unsqueeze(1)).squeeze(-1)
     log_probs = torch.log(token_probs)
+    return next_tokens, log_probs
+
+
+def top_k_top_p_combined_flashinfer_sampling_batch(logits, top_k, top_p, temperature, seed):
+    logits_dim = logits.dim()
+    if logits_dim == 1:
+        logits = logits.unsqueeze(0)
+
+    # Apply temperature (element-wise division)
+    logits = logits / temperature.unsqueeze(1)
+
+    # Convert to probabilities
+    probs = torch.softmax(logits, dim=-1)
+
+    # Set CUDA seed directly
+    torch.cuda.manual_seed_all(seed)
+
+    # Use FlashInfer for sampling
+    next_tokens = flashinfer.sampling.top_k_top_p_sampling_from_probs(
+        probs, top_k, top_p, deterministic=True)
+    next_tokens = next_tokens.to(torch.int64)  # Convert to int64 to match expected type
+
+    # Get token probabilities and log probs
+    token_probs = torch.gather(probs, dim=1, index=next_tokens.unsqueeze(1)).squeeze(-1)
+    log_probs = torch.log(token_probs)
+
     return next_tokens, log_probs
 
 
@@ -361,7 +388,55 @@ class TorchDecoder(Decoder):
     def _batch_decode(self, scheduled_requests: ScheduledRequests,
                       model_outputs) -> DecoderState:
         logits = model_outputs["logits"]
-        new_tokens_device = torch.argmax(logits, dim=-1)
+        batch_size = logits.size(0)
+        device = logits.device
+
+        seed = torch.full((batch_size,), 0, device=device)
+        top_k = torch.full((batch_size,), 50, device=device)
+        top_p = torch.full((batch_size,), 1.0, device=device)
+        temperature = torch.full((batch_size,), 1.0, device=device)
+
+        idx = 0
+        for request in scheduled_requests.context_requests:
+            if request.state != LlmRequestState.GENERATION_COMPLETE:
+                if request.sampling_config.random_seed is not None and len(request.sampling_config.random_seed) > 0:
+                    seed[idx] = request.sampling_config.random_seed[0]
+                if request.sampling_config.top_k is not None and len(request.sampling_config.top_k) > 0:
+                    top_k[idx] = request.sampling_config.top_k[0]
+                if request.sampling_config.top_p is not None and len(request.sampling_config.top_p) > 0:
+                    top_p[idx] = request.sampling_config.top_p[0]
+                if request.sampling_config.temperature is not None and len(request.sampling_config.temperature) > 0:
+                    temperature[idx] = request.sampling_config.temperature[0]
+                    if temperature[idx] == 0:
+                        top_k[idx] = 1
+                        temperature[idx] = 1.0
+            idx += 1
+
+        for request in scheduled_requests.generation_requests:
+            if request.state != LlmRequestState.GENERATION_COMPLETE:
+                if request.sampling_config.random_seed is not None and len(request.sampling_config.random_seed) > 0:
+                    seed[idx] = request.sampling_config.random_seed[0]
+                if request.sampling_config.top_k is not None and len(request.sampling_config.top_k) > 0:
+                    top_k[idx] = request.sampling_config.top_k[0]
+                if request.sampling_config.top_p is not None and len(request.sampling_config.top_p) > 0:
+                    top_p[idx] = request.sampling_config.top_p[0]
+                if request.sampling_config.temperature is not None and len(request.sampling_config.temperature) > 0:
+                    temperature[idx] = request.sampling_config.temperature[0]
+                    if temperature[idx] == 0:
+                        top_k[idx] = 1
+                        temperature[idx] = 1.0
+            idx += 1
+
+        non_zero_seeds = seed[seed > 0]
+        random_seed = non_zero_seeds[0].item() if len(non_zero_seeds) > 0 else 0
+
+        # Original greedy sampling implementation
+        # new_tokens_device = torch.argmax(logits, dim=-1)
+        # TRT-LLM batch top-p sampling implementation
+        # new_tokens_device, _ = top_p_sampling_batch(logits, 1.0, 1.0, 123)
+        # Flashinfer combined sampling implementation
+        new_tokens_device, log_probs = top_k_top_p_combined_flashinfer_sampling_batch(
+            logits=logits, top_k=top_k, top_p=top_p, temperature=temperature, seed=random_seed)
         new_tokens_host = new_tokens_device.to('cpu', non_blocking=True)
         decoder_event = torch.cuda.Event()
         decoder_event.record()
@@ -634,3 +709,4 @@ class TRTLLMDecoder(Decoder):
 
     def decode(self, scheduled_requests: ScheduledRequests, model_outputs):
         self._update_requests(scheduled_requests)
+
