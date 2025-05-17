@@ -184,6 +184,7 @@ class MTPDecoder(TorchDecoder):
 
     DEFAULT_TOP_K = 50
     DEFAULT_TEMPERATURE = 1.0
+
     def __init__(self, max_seq_len: int, config: MTPConfig):
         super().__init__(max_seq_len, False)
         self.mapping = None
@@ -250,18 +251,21 @@ class MTPDecoder(TorchDecoder):
         self._b10_fill_custom_requests(scheduled_requests, model_outputs["logits"].shape[1], model_outputs["logits"].device)
         
     def _b10_fill_custom_requests(self, scheduled_requests: ScheduledRequests, vocab_size: int, device: torch.device):
-        logits_idx = []
-        request_idx = []
 
+        # requests that require custom sampling
+        request_idx = []
+        # logits idx of each request from request_idx
+        logits_idx = []
+
+        # index into request_idx for requests that require temperature
         temperature_idx = []
         temperature = []
 
+        # index into request_idx for requests that require top_p
         top_p_req_idx = []
         top_p_vals = []
 
-        top_k_req_idx = []
-        top_k_vals = []
-
+        # requests that require guided sampling (not included in request_idx)
         guided_requests = []
         guided_logits_idx = []
         
@@ -294,30 +298,19 @@ class MTPDecoder(TorchDecoder):
                 top_p_vals.append(request.sampling_config.top_p[0])
                 is_custom = True
 
-            if (request.sampling_config.top_k is not None
-                and request.sampling_config.top_k[0] >= 1
-                and request.sampling_config.top_k[0] != self.DEFAULT_TOP_K):
-                assert len(request.sampling_config.top_k) == 1
-                top_k_req_idx.append(len(logits_idx))
-                top_k_vals.append(min(request.sampling_config.top_k[0], vocab_size))
-                is_custom = True
-
             if is_custom:
                 logits_idx.append(cur_idx)
                 request_idx.append(i)
 
         top_p = torch.ones((len(logits_idx),), device=device, dtype=torch.float32)
-        top_k = torch.full((len(logits_idx),), self.DEFAULT_TOP_K, device=device, dtype=torch.int32)
 
         top_p[top_p_req_idx] = torch.tensor(top_p_vals, device=device, dtype=top_p.dtype)
-        top_k[top_k_req_idx] = torch.tensor(top_k_vals, device=device, dtype=top_k.dtype)
 
         self.request_idx = torch.tensor(request_idx, device=device, dtype=torch.int32)
         self.logits_idx = torch.tensor(logits_idx, device=device, dtype=torch.int32)
         self.temperature_idx = torch.tensor(temperature_idx, device=device, dtype=torch.int32)
         self.temperature = temperature
         self.top_p = top_p
-        self.top_k = top_k
         self.guided_requests = torch.tensor(guided_requests, device=device, dtype=torch.int32)
         self.guided_logits_idx = torch.tensor(guided_logits_idx, device=device, dtype=torch.int32)
 
@@ -332,7 +325,6 @@ class MTPDecoder(TorchDecoder):
         temperature_idx = self.temperature_idx
         temperature = self.temperature
         top_p = self.top_p
-        top_k = self.top_k
 
         if len(request_idx) == 0:
             return [], [], []
@@ -347,7 +339,7 @@ class MTPDecoder(TorchDecoder):
         if len(temperature_idx) > 0:
             logits[temperature_idx,:] /= torch.tensor(temperature, device=logits.device, dtype=logits.dtype).unsqueeze(1)
 
-        sampled_tokens = flashinfer.top_k_top_p_sampling_from_logits(logits, top_k, top_p, check_nan=True)
+        sampled_tokens = flashinfer.top_k_top_p_sampling_from_logits(logits, self.DEFAULT_TOP_K, top_p)
         return request_idx, sampled_token_idx, sampled_tokens
     
     def _b10_handle_guided_requests(self, scheduled_requests: ScheduledRequests,
@@ -375,7 +367,8 @@ class MTPDecoder(TorchDecoder):
         request_idx, sampled_token_idx, sampled_tokens = self._b10_batch_decode(scheduled_requests, model_outputs)
         guided_request_idx, guided_sampled_tokens = self._b10_handle_guided_requests(scheduled_requests, model_outputs)
 
-        if len(request_idx) > 0 or len(guided_request_idx) > 0:
+        has_custom_sampling = len(request_idx) > 0 or len(guided_request_idx) > 0
+        if has_custom_sampling:
             cpy_new_tokens = new_tokens_device.clone()
             cpy_next_new_tokens = next_new_tokens_device.clone()
             cpy_lens = new_tokens_lens_device.clone()
@@ -393,7 +386,7 @@ class MTPDecoder(TorchDecoder):
             # set lens to 1 (disable MTP for custom requests)
             cpy_lens[guided_request_idx] = 1
         
-        if len(request_idx) > 0 or len(guided_request_idx) > 0:
+        if has_custom_sampling:
             new_tokens_device = cpy_new_tokens
             next_new_tokens_device = cpy_next_new_tokens
             new_tokens_lens_device = cpy_lens
