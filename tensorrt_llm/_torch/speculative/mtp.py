@@ -106,6 +106,8 @@ class MTPSpecMetadata(SpecMetadata):
     batch_indices_cuda: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
+        torch.manual_seed(42)
+
         if self.mtp_hidden_states_manager is not None:
             # mtp_hidden_states_ptrs is a pointer tensor
             self.mtp_hidden_states_ptrs = torch.empty(
@@ -247,9 +249,17 @@ class MTPDecoder(TorchDecoder):
             idx += 1
     
     def setup_decoder(self, scheduled_requests: ScheduledRequests, model_outputs):
-        torch.manual_seed(42)
         self._b10_fill_custom_requests(scheduled_requests, model_outputs["logits"].shape[1], model_outputs["logits"].device)
-        
+    
+
+    # Initializes:
+    # self.request_idx
+    # self.logits_idx
+    # self.temperature_idx
+    # self.temperature
+    # self.top_p
+    # self.guided_requests
+    # self.guided_logits_idx
     def _b10_fill_custom_requests(self, scheduled_requests: ScheduledRequests, vocab_size: int, device: torch.device):
 
         # requests that require custom sampling
@@ -315,10 +325,12 @@ class MTPDecoder(TorchDecoder):
         self.guided_logits_idx = torch.tensor(guided_logits_idx, device=device, dtype=torch.int32)
 
 
-    # returns request_idx, sampled_tokens for requests that require
-    # temperature, top_k, and/or top_p
+    # Processes requests with top_p or temperature.
+    # returns (request indices which were sampled,
+    #          sampled token offset for each such request,
+    #          sampled token for each such request)
     def _b10_batch_decode(self, scheduled_requests: ScheduledRequests,
-                                model_outputs) -> List[LlmRequest]:
+                                model_outputs) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
 
         request_idx = self.request_idx
         logits_idx = self.logits_idx
@@ -342,6 +354,9 @@ class MTPDecoder(TorchDecoder):
         sampled_tokens = flashinfer.top_k_top_p_sampling_from_logits(logits, self.DEFAULT_TOP_K, top_p)
         return request_idx, sampled_token_idx, sampled_tokens
     
+    # Processes requests with guided sampling.
+    # returns (request indices which were sampled,
+    #          sampled token for each such request)
     def _b10_handle_guided_requests(self, scheduled_requests: ScheduledRequests,
                                     model_outputs):
         if len(self.guided_requests) == 0:
