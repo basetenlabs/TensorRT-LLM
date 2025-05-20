@@ -16,13 +16,15 @@ class B10Decoder:
     #          sampled token for each such request)
     @staticmethod
     def custom_decode(scheduled_requests: ScheduledRequests, model_outputs: dict[str, torch.Tensor],
+                      draft_len: int = 0,
                       process_all_requests: bool = False):
-        inputs = B10Decoder._get_custom_sampling_params(scheduled_requests, model_outputs['logits'].device, process_all_requests)
+        inputs = B10Decoder._get_custom_sampling_params(scheduled_requests, model_outputs['logits'].device, draft_len=draft_len, process_all_requests=process_all_requests)
         return B10Decoder._batch_decode(model_outputs, **inputs)
 
     @staticmethod
     def _get_custom_sampling_params(scheduled_requests: ScheduledRequests,
                                         device: torch.device,
+                                        draft_len: int = 0,
                                         process_all_requests: bool = False) -> dict[str, torch.Tensor]:
 
         # requests that require custom sampling
@@ -40,8 +42,11 @@ class B10Decoder:
         for i, request in enumerate(itertools.chain(scheduled_requests.context_requests,
                                 scheduled_requests.generation_requests)):
             cur_idx = next_idx
-            next_idx += 1 + request.num_draft_tokens
-    
+            if i < len(scheduled_requests.context_requests):
+                next_idx += 1
+            else:
+                next_idx += 1 + draft_len
+
             is_custom = process_all_requests
 
             is_greedy = False

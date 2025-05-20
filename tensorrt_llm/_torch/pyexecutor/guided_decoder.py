@@ -39,10 +39,11 @@ class GuidedDecoder:
     bitmask_dtype = torch.int32
 
     def __init__(self, guided_decoding_config: GuidedDecodingConfig,
-                 max_num_sequences: int, vocab_size_padded: int):
+                 max_num_sequences: int, vocab_size_padded: int, draft_len: int = 0):
         self.guided_decoding_backend = guided_decoding_config.backend
         self.max_num_sequences = max_num_sequences
         self.vocab_size_padded = vocab_size_padded
+        self.draft_len = draft_len
 
         if self.guided_decoding_backend == GuidedDecodingConfig.GuidedDecodingBackend.XGRAMMAR:
             if guided_decoding_config.tokenizer_str is not None:
@@ -140,11 +141,17 @@ class GuidedDecoder:
             batched_logits, batched_bitmask = [], []
             cur_logits_idx = 0
             next_logits_idx = 0
-            for _, llm_req in enumerate(
+            for i, llm_req in enumerate(
                     itertools.chain(scheduled_requests.context_requests,
                                     scheduled_requests.generation_requests)):
-                cur_logits_idx = next_logits_idx
-                next_logits_idx += 1 + llm_req.num_draft_tokens
+
+                if llm_req in scheduled_requests.context_requests:
+                    rows = 1
+                else:
+                    rows = self.draft_len + 1
+                cur_logits_idx  = next_logits_idx
+                next_logits_idx = next_logits_idx + rows
+
                 if llm_req.guided_decoding_params is None:
                     continue
                 if llm_req.is_context_init_state and not llm_req.is_last_context_chunk(
@@ -152,7 +159,7 @@ class GuidedDecoder:
                     continue
 
                 # [BASETEN] adjust the indices to work with MTP (cur_logits_idx, next_logits_idx vs i)
-                batched_logits.append(logits[cur_logits_idx])
+                batched_logits.append(logits[next_logits_idx - 1])
                 slot = resource_manager.slot_manager.get_slot(
                     llm_req.request_id)
                 batched_bitmask.append(self.bitmask[slot])

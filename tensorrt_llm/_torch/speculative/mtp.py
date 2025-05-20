@@ -256,7 +256,7 @@ class MTPDecoder(TorchDecoder):
 
         ### BASETEN MTP DECODING BEGIN
 
-        request_idx, sampled_token_offset, sampled_tokens = B10Decoder.custom_decode(scheduled_requests, model_outputs)
+        request_idx, sampled_token_offset, sampled_tokens = B10Decoder.custom_decode(scheduled_requests, model_outputs, draft_len=self.draft_len)
 
         if len(request_idx) > 0:
             cpy_new_tokens = new_tokens_device.clone()

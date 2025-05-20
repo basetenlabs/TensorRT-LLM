@@ -282,9 +282,11 @@ class PyTorchModelEngine(ModelEngine):
         self.guided_decoder: Optional[GuidedDecoder] = None
         if self.mapping.is_last_pp_rank(
         ) and guided_decoding_config is not None:
+            draft_len = self.spec_config.max_draft_tokens if self.spec_config is not None else 0
             self.guided_decoder = GuidedDecoder(guided_decoding_config,
                                                 self.batch_size,
-                                                self.model.vocab_size_padded)
+                                                self.model.vocab_size_padded,
+                                                draft_len=draft_len)
 
         try:
             if pytorch_backend_config.torch_compile_enabled:
