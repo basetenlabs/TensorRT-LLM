@@ -1,8 +1,11 @@
+import itertools
+import os
 from dataclasses import dataclass
 from typing import List, Optional
 
 import torch
 from torch import nn
+import math
 
 from tensorrt_llm.bindings.executor import FinishReason
 
@@ -13,6 +16,7 @@ from ..pyexecutor.resource_manager import BaseResourceManager, SlotManager
 from ..pyexecutor.scheduler import ScheduledRequests
 from .interface import SpecConfig, SpecMetadata, SpeculativeDecodingMode
 
+from ..pyexecutor.b10 import B10Decoder
 
 @dataclass
 class MTPConfig(SpecConfig):
@@ -101,6 +105,8 @@ class MTPSpecMetadata(SpecMetadata):
     batch_indices_cuda: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
+        torch.manual_seed(42)
+
         if self.mtp_hidden_states_manager is not None:
             # mtp_hidden_states_ptrs is a pointer tensor
             self.mtp_hidden_states_ptrs = torch.empty(
@@ -176,7 +182,6 @@ class MTPDecoder(TorchDecoder):
     """
     MTP decoder.
     """
-
     def __init__(self, max_seq_len: int, config: MTPConfig):
         super().__init__(max_seq_len, False)
         self.mapping = None
@@ -248,6 +253,26 @@ class MTPDecoder(TorchDecoder):
         new_tokens_lens_device = model_outputs['new_tokens_lens']
         next_draft_tokens_device = model_outputs['next_draft_tokens']
         next_new_tokens_device = model_outputs['next_new_tokens']
+
+        ### BASETEN MTP DECODING BEGIN
+
+        request_idx, sampled_token_offset, sampled_tokens = B10Decoder.custom_decode(scheduled_requests, model_outputs)
+
+        if len(request_idx) > 0:
+            cpy_new_tokens = new_tokens_device.clone()
+            cpy_next_new_tokens = next_new_tokens_device.clone()
+            cpy_lens = new_tokens_lens_device.clone()
+
+            cpy_new_tokens[request_idx, sampled_token_offset] = sampled_tokens
+            cpy_next_new_tokens[request_idx, sampled_token_offset] = sampled_tokens
+            cpy_lens[request_idx] = sampled_token_offset + 1
+
+            new_tokens_device = cpy_new_tokens
+            next_new_tokens_device = cpy_next_new_tokens
+            new_tokens_lens_device = cpy_lens
+
+        ### BASETEN MTP DECODING END
+
         new_tokens_host = new_tokens_device.to('cpu', non_blocking=True)
         new_tokens_lens_host = new_tokens_lens_device.to('cpu',
                                                          non_blocking=True)
