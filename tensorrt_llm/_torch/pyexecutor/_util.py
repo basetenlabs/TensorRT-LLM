@@ -322,12 +322,13 @@ def create_py_executor_instance(
     spec_config = model_engine.spec_config
     if mapping.is_last_pp_rank(
     ) and executor_config.guided_decoding_config is not None:
-        if spec_config is not None:
-            raise ValueError(
-                "Guided decoding is not supported with speculative decoding.")
         if not pytorch_backend_config.disable_overlap_scheduler:
             raise ValueError(
                 "Guided decoding is not supported with overlap scheduler.")
+            logger.warning("[BASETEN] MTP with guided decoding 🚀")
+            # [BASETEN] the following error was commented out to support MTP
+            # raise ValueError(
+            #     "Guided decoding is not supported with speculative decoding.")
 
     logger.info(
         f"max_seq_len={executor_config.max_seq_len}, max_num_requests={executor_config.max_batch_size}, max_num_tokens={executor_config.max_num_tokens}"

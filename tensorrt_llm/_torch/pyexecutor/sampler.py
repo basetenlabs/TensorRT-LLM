@@ -22,6 +22,8 @@ from tensorrt_llm.mapping import Mapping
 from .llm_request import LlmRequest, LlmRequestState
 from .scheduler import ScheduledRequests
 
+from .b10 import B10Decoder
+
 
 @dataclass(frozen=True, kw_only=True)
 class SampleStateTensors:
@@ -182,6 +184,8 @@ class TorchSampler(Sampler):
     def __init__(self, max_seq_len: int, mixed_sampler: bool = False):
         self.max_seq_len = max_seq_len
         self.mixed_sampler = mixed_sampler
+
+        torch.manual_seed(42)
 
     def _meet_max_token_stop_criteria(self, request: LlmRequest,
                                       num_tokens: int):
@@ -375,7 +379,15 @@ class TorchSampler(Sampler):
     def _batch_sample(self, scheduled_requests: ScheduledRequests,
                       model_outputs) -> SampleState:
         logits = model_outputs["logits"]
-        new_tokens_device = torch.argmax(logits, dim=-1)
+        #new_tokens_device = torch.argmax(logits, dim=-1)
+
+        # BASETEN DECODING BEGIN
+        _, _, sampled_tokens = B10Decoder.custom_decode(scheduled_requests,
+                                                                  model_outputs,
+                                                                  process_all_requests=True)
+        new_tokens_device = sampled_tokens
+        # BASETEN DECODING END
+
         new_tokens_host = new_tokens_device.to('cpu', non_blocking=True)
         sampler_event = torch.cuda.Event()
         sampler_event.record()
