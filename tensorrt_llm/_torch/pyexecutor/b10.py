@@ -123,6 +123,12 @@ class B10Decoder:
         )
 
         sampled_token_offset = (lens[request_idx] - 1) * ~disable_mtp_mask
+
+        # check for garbage output
+        if 'new_tokens_lens' in model_outputs and 'new_tokens' in model_outputs:
+            disable_mtp_mask |= (model_outputs['new_tokens'][request_idx,sampled_token_offset] == 0)
+            sampled_token_offset *= ~disable_mtp_mask
+
         idxes = logits_idx + sampled_token_offset
 
         logits = logits[idxes,:]
