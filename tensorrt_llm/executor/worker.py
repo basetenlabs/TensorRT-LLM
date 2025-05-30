@@ -202,6 +202,7 @@ class ExecutorBindingsWorker(GenerationExecutor):
                 logger.warning(
                     f"Request of client_id {client_id} is finished, cannot abort it."
                 )
+                return
             self.engine.cancel_request(request_id)
 
     def _engine_response_callback(self, response: tllm.Response):
