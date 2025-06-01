@@ -82,7 +82,6 @@ class Eagle3SpecMetadata(SpecMetadata):
                 to_save = hidden_states + residual if residual is not None else hidden_states
                 self.hidden_states.append(to_save)
         else:
-            assert len(self.hidden_states) == len(self.layers_to_capture)
             for i, captured_layer_id in enumerate(self.layers_to_capture):
                 if captured_layer_id == layer_id:
                     to_save = hidden_states + residual if residual is not None else hidden_states
@@ -157,8 +156,6 @@ class Eagle3Decoder(TorchDecoder):
                 new_tokens.append(b10_token)
                 b10_idx += 1
                 
-            assert next_idx == len(new_tokens_device)
-            assert b10_idx == len(b10_sampled_tokens)
             new_tokens_device = torch.cat(new_tokens, dim=0)
             b10_sampled_tokens_device = b10_sampled_tokens
         # BASETEN EAGLE3 DECODING END
@@ -200,6 +197,8 @@ class Eagle3Decoder(TorchDecoder):
         for request in scheduled_requests.context_requests:
             if request.get_context_remaining_length() != 0:
                 idx += 1
+                if request.is_custom:
+                    b10_idx += 1
                 continue
 
             if request.state != LlmRequestState.GENERATION_COMPLETE:
@@ -209,6 +208,8 @@ class Eagle3Decoder(TorchDecoder):
                                            beam_idx)
                 request.py_decoding_iter += 1
             idx += 1
+            if request.is_custom:
+                b10_idx += 1
 
         if hasattr(scheduled_requests, 'chunked_requests'):
             idx += len(scheduled_requests.chunked_requests)
@@ -222,6 +223,8 @@ class Eagle3Decoder(TorchDecoder):
                                             beam_idx)
                     request.py_decoding_iter += 1
                 idx += 1
+                if request.is_custom:
+                    b10_idx += 1
                 continue
 
             num_accepted = 0
@@ -248,12 +251,10 @@ class Eagle3Decoder(TorchDecoder):
                         if self._handle_stop_criteria(request, new_token,
                                                     num_tokens, beam_idx):
                             break
-                else:
-                    assert new_tokens_list[idx] == b10_tokens_list[b10_idx]
-                    b10_idx += 1
             
             if num_accepted > 0: 
-                if b10_tokens_list is not None:
+                # if the request is not complete, we can patch the last token with ours.
+                if b10_tokens_list is not None and request.state != LlmRequestState.GENERATION_COMPLETE:
                     draft_tokens_accepted[num_accepted - 1] = b10_tokens_list[b10_idx + num_accepted]
                 for token in draft_tokens_accepted:
                     request.add_new_token(token, beam_idx)
@@ -262,4 +263,5 @@ class Eagle3Decoder(TorchDecoder):
             request.py_rewind_len = request.py_draft_pages_allocated - num_accepted
             inc = (len(request.py_draft_tokens) if not request.is_mtp_disabled else 0) + 1
             idx += inc
-            b10_idx += inc
+            if request.is_custom:
+                b10_idx += inc
