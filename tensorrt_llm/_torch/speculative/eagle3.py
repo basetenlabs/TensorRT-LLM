@@ -126,8 +126,6 @@ class Eagle3Decoder(TorchDecoder):
 
         # BASETEN EAGLE3 DECODING BEGIN
         request_idx, _, b10_sampled_tokens = B10Eagle3Decoder.custom_decode(scheduled_requests, model_outputs)
-        # print("new_tokens_device", new_tokens_device)
-        # print("b10_sampled_tokens", b10_sampled_tokens)
         b10_sampled_tokens_device = None
         if len(request_idx) > 0:
             cur_idx = 0
@@ -137,7 +135,7 @@ class Eagle3Decoder(TorchDecoder):
             for request in itertools.chain(scheduled_requests.context_requests,
                                     scheduled_requests.generation_requests):
                 cur_idx = next_idx
-                next_idx += 1 + request.num_draft_tokens
+                next_idx += 1 + (len(request.py_draft_tokens) if request.py_draft_tokens is not None else request.num_draft_tokens)
                 if not request.is_custom:
                     new_tokens.append(new_tokens_device[cur_idx:next_idx])
                     continue
@@ -145,7 +143,7 @@ class Eagle3Decoder(TorchDecoder):
                 if not request.is_mtp_disabled:
                     # use tokens from eagle3
                     new_tokens.append(new_tokens_device[cur_idx:next_idx])
-                    b10_idx += 1 + request.num_draft_tokens
+                    b10_idx += 1 + (len(request.py_draft_tokens) if request.py_draft_tokens is not None else request.num_draft_tokens)
                     continue
 
                 # use tokens from base10 for guided decoding
@@ -232,13 +230,13 @@ class Eagle3Decoder(TorchDecoder):
             if request.state != LlmRequestState.GENERATION_COMPLETE:
                 new_token = new_tokens_list[idx]
                 num_tokens = request.add_new_token(new_token, beam_idx)
-                self._handle_stop_criteria(request, new_token, num_tokens,
+                stop_criteria_met = self._handle_stop_criteria(request, new_token, num_tokens,
                                            beam_idx)
                 request.py_decoding_iter += 1
 
                 # Accept draft tokens (if we have any) if and only if they match the new
                 # token exactly.
-                if not request.is_mtp_disabled:
+                if not request.is_mtp_disabled and not stop_criteria_met:
                     for draft_token in request.py_draft_tokens:
                         if draft_token != new_token:
                             # Reject.

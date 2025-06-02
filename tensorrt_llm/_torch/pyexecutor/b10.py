@@ -166,7 +166,7 @@ class B10Eagle3Decoder(B10Decoder):
         for i, request in enumerate(itertools.chain(scheduled_requests.context_requests,
                                 scheduled_requests.generation_requests)):
             cur_idx = next_idx
-            next_idx += 1 + request.num_draft_tokens
+            next_idx += 1 + (len(request.py_draft_tokens) if request.py_draft_tokens is not None else request.num_draft_tokens)
     
             is_custom = process_all_requests
 
@@ -238,3 +238,35 @@ class B10Eagle3Decoder(B10Decoder):
             'disable_mtp_mask': disable_mtp_mask,
             'greedy_mask': greedy_mask,
         }
+
+    @staticmethod
+    def _batch_decode(model_outputs,
+                          *,
+                          request_idx,
+                          logits_idx,
+                          temperature,
+                          top_p,
+                          disable_mtp_mask,
+                          greedy_mask) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        if len(request_idx) == 0:
+            return [], [], []
+
+        final_logits = model_outputs['logits'][logits_idx, :]
+        final_logits = final_logits / temperature.unsqueeze(1)
+
+        sampled_tokens = torch.empty_like(logits_idx, dtype=torch.int32)
+        
+        non_greedy_mask_for_sampling = ~greedy_mask
+        
+        if torch.any(non_greedy_mask_for_sampling):
+            current_logits_not_greedy = final_logits[non_greedy_mask_for_sampling, :]
+            sampled_tokens[non_greedy_mask_for_sampling] = flashinfer.top_k_top_p_sampling_from_logits(
+                current_logits_not_greedy, B10Decoder.DEFAULT_TOP_K, top_p[non_greedy_mask_for_sampling]
+            )
+
+        if torch.any(greedy_mask):
+            current_logits_greedy = final_logits[greedy_mask, :]
+            sampled_tokens[greedy_mask] = torch.argmax(current_logits_greedy, dim=1).to(torch.int32)
+
+        return request_idx, None, sampled_tokens
