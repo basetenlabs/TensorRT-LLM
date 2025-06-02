@@ -1,18 +1,19 @@
+import itertools
 from dataclasses import dataclass, field
 from itertools import chain
 from typing import Dict, List, Optional, Tuple
 
 import torch
 
+import tensorrt_llm
+import tensorrt_llm.bindings
+
+from ..pyexecutor.b10 import B10Eagle3Decoder
 from ..pyexecutor.decoder import DecoderState, TorchDecoder
 from .interface import SpecConfig, SpecMetadata, SpeculativeDecodingMode
 
-from ..pyexecutor.b10 import B10Eagle3Decoder
-import itertools
-
-import tensorrt_llm
-import tensorrt_llm.bindings
 LlmRequestState = tensorrt_llm.bindings.LlmRequestState
+
 
 @dataclass
 class Eagle3Config(SpecConfig):
@@ -120,22 +121,27 @@ class Eagle3SpecMetadata(SpecMetadata):
 
 
 class Eagle3Decoder(TorchDecoder):
+
     def _batch_decode(self, scheduled_requests, model_outputs):
         logits = model_outputs["logits"]
         new_tokens_device = torch.argmax(logits, dim=-1)
 
         # BASETEN EAGLE3 DECODING BEGIN
-        request_idx, _, b10_sampled_tokens = B10Eagle3Decoder.custom_decode(scheduled_requests, model_outputs)
+        request_idx, _, b10_sampled_tokens = B10Eagle3Decoder.custom_decode(
+            scheduled_requests, model_outputs)
         b10_sampled_tokens_device = None
         if len(request_idx) > 0:
             cur_idx = 0
             next_idx = 0
             b10_idx = 0
             new_tokens = []
-            for request in itertools.chain(scheduled_requests.context_requests,
-                                    scheduled_requests.generation_requests):
+            for request in itertools.chain(
+                    scheduled_requests.context_requests,
+                    scheduled_requests.generation_requests):
                 cur_idx = next_idx
-                next_idx += 1 + (len(request.py_draft_tokens) if request.py_draft_tokens is not None else request.num_draft_tokens)
+                next_idx += 1 + (len(request.py_draft_tokens)
+                                 if request.py_draft_tokens is not None else
+                                 request.num_draft_tokens)
                 if not request.is_custom:
                     new_tokens.append(new_tokens_device[cur_idx:next_idx])
                     continue
@@ -143,7 +149,9 @@ class Eagle3Decoder(TorchDecoder):
                 if not request.is_mtp_disabled:
                     # use tokens from eagle3
                     new_tokens.append(new_tokens_device[cur_idx:next_idx])
-                    b10_idx += 1 + (len(request.py_draft_tokens) if request.py_draft_tokens is not None else request.num_draft_tokens)
+                    b10_idx += 1 + (len(request.py_draft_tokens)
+                                    if request.py_draft_tokens is not None else
+                                    request.num_draft_tokens)
                     continue
 
                 # use tokens from base10 for guided decoding
@@ -153,7 +161,7 @@ class Eagle3Decoder(TorchDecoder):
                     b10_token = b10_token.unsqueeze(0)
                 new_tokens.append(b10_token)
                 b10_idx += 1
-                
+
             new_tokens_device = torch.cat(new_tokens, dim=0)
             b10_sampled_tokens_device = b10_sampled_tokens
         # BASETEN EAGLE3 DECODING END
@@ -161,12 +169,18 @@ class Eagle3Decoder(TorchDecoder):
         if "d2t" in model_outputs:
             d2t = model_outputs["d2t"]
             new_tokens_device = d2t[new_tokens_device] + new_tokens_device
-            b10_sampled_tokens_device = d2t[b10_sampled_tokens_device] + b10_sampled_tokens_device if len(request_idx) > 0 else None
+            b10_sampled_tokens_device = d2t[
+                b10_sampled_tokens_device] + b10_sampled_tokens_device if len(
+                    request_idx) > 0 else None
 
-        b10_sampled_tokens_host = b10_sampled_tokens_device.to('cpu', non_blocking=True) if len(request_idx) > 0 else None
+        b10_sampled_tokens_host = b10_sampled_tokens_device.to(
+            'cpu', non_blocking=True) if len(request_idx) > 0 else None
         new_tokens_host = new_tokens_device.to('cpu', non_blocking=True)
         new_tensors_device = {"new_tokens_device": new_tokens_device}
-        new_tensors_host = {"new_tokens_host": new_tokens_host, "b10_sampled_tokens_host": b10_sampled_tokens_host}
+        new_tensors_host = {
+            "new_tokens_host": new_tokens_host,
+            "b10_sampled_tokens_host": b10_sampled_tokens_host
+        }
         decoder_event = torch.cuda.Event()
         decoder_event.record()
         return DecoderState(scheduled_requests=scheduled_requests,
@@ -184,7 +198,8 @@ class Eagle3Decoder(TorchDecoder):
             decoder_state.decoder_event.synchronize()
         new_tokens_list = decoder_state.new_tensors_host[
             "new_tokens_host"].tolist()
-        b10_tokens_list = decoder_state.new_tensors_host.get("b10_sampled_tokens_host", None)
+        b10_tokens_list = decoder_state.new_tensors_host.get(
+            "b10_sampled_tokens_host", None)
         if b10_tokens_list is not None:
             b10_tokens_list = b10_tokens_list.tolist()
         scheduled_requests = decoder_state.scheduled_requests
@@ -218,7 +233,7 @@ class Eagle3Decoder(TorchDecoder):
                     new_token = new_tokens_list[idx]
                     num_tokens = request.add_new_token(new_token, beam_idx)
                     self._handle_stop_criteria(request, new_token, num_tokens,
-                                            beam_idx)
+                                               beam_idx)
                     request.py_decoding_iter += 1
                 idx += 1
                 if request.is_custom:
@@ -230,8 +245,8 @@ class Eagle3Decoder(TorchDecoder):
             if request.state != LlmRequestState.GENERATION_COMPLETE:
                 new_token = new_tokens_list[idx]
                 num_tokens = request.add_new_token(new_token, beam_idx)
-                stop_criteria_met = self._handle_stop_criteria(request, new_token, num_tokens,
-                                           beam_idx)
+                stop_criteria_met = self._handle_stop_criteria(
+                    request, new_token, num_tokens, beam_idx)
                 request.py_decoding_iter += 1
 
                 # Accept draft tokens (if we have any) if and only if they match the new
@@ -247,19 +262,22 @@ class Eagle3Decoder(TorchDecoder):
                         draft_tokens_accepted.append(new_token)
                         num_tokens += 1
                         if self._handle_stop_criteria(request, new_token,
-                                                    num_tokens, beam_idx):
+                                                      num_tokens, beam_idx):
                             break
-            
-            if num_accepted > 0: 
+
+            if num_accepted > 0:
                 # if the request is not complete, we can patch the last token with ours.
                 if b10_tokens_list is not None and request.state != LlmRequestState.GENERATION_COMPLETE:
-                    draft_tokens_accepted[num_accepted - 1] = b10_tokens_list[b10_idx + num_accepted]
+                    draft_tokens_accepted[num_accepted -
+                                          1] = b10_tokens_list[b10_idx +
+                                                               num_accepted]
                 for token in draft_tokens_accepted:
                     request.add_new_token(token, beam_idx)
 
             request.py_num_accepted_draft_tokens = num_accepted
             request.py_rewind_len = request.py_draft_pages_allocated - num_accepted
-            inc = (len(request.py_draft_tokens) if not request.is_mtp_disabled else 0) + 1
+            inc = (len(request.py_draft_tokens)
+                   if not request.is_mtp_disabled else 0) + 1
             idx += inc
             if request.is_custom:
                 b10_idx += inc

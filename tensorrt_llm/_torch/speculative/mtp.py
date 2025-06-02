@@ -1,22 +1,19 @@
-import itertools
-import os
 from dataclasses import dataclass
 from typing import List, Optional
 
 import torch
 from torch import nn
-import math
 
 from tensorrt_llm.bindings.executor import FinishReason
 
 from ..attention_backend import AttentionMetadata
+from ..pyexecutor.b10 import B10Decoder
 from ..pyexecutor.decoder import DecoderState, TorchDecoder
 from ..pyexecutor.llm_request import LlmRequest, LlmRequestState
 from ..pyexecutor.resource_manager import BaseResourceManager, SlotManager
 from ..pyexecutor.scheduler import ScheduledRequests
 from .interface import SpecConfig, SpecMetadata, SpeculativeDecodingMode
 
-from ..pyexecutor.b10 import B10Decoder
 
 @dataclass
 class MTPConfig(SpecConfig):
@@ -182,6 +179,7 @@ class MTPDecoder(TorchDecoder):
     """
     MTP decoder.
     """
+
     def __init__(self, max_seq_len: int, config: MTPConfig):
         super().__init__(max_seq_len, False)
         self.mapping = None
@@ -256,7 +254,8 @@ class MTPDecoder(TorchDecoder):
 
         ### BASETEN MTP DECODING BEGIN
 
-        request_idx, sampled_token_offset, sampled_tokens = B10Decoder.custom_decode(scheduled_requests, model_outputs)
+        request_idx, sampled_token_offset, sampled_tokens = B10Decoder.custom_decode(
+            scheduled_requests, model_outputs)
 
         if len(request_idx) > 0:
             cpy_new_tokens = new_tokens_device.clone()
@@ -264,7 +263,8 @@ class MTPDecoder(TorchDecoder):
             cpy_lens = new_tokens_lens_device.clone()
 
             cpy_new_tokens[request_idx, sampled_token_offset] = sampled_tokens
-            cpy_next_new_tokens[request_idx, sampled_token_offset] = sampled_tokens
+            cpy_next_new_tokens[request_idx,
+                                sampled_token_offset] = sampled_tokens
             cpy_lens[request_idx] = sampled_token_offset + 1
 
             new_tokens_device = cpy_new_tokens

@@ -306,7 +306,8 @@ def create_py_executor_instance(dist,
     if mapping.is_last_pp_rank(
     ) and executor_config.guided_decoding_config is not None:
         if spec_config is not None:
-            logger.warning(f"[BASETEN] {spec_config.spec_dec_name} with guided decoding 🚀")
+            logger.warning(
+                f"[BASETEN] {spec_config.spec_dec_name} with guided decoding 🚀")
             # [BASETEN] the following error was commented out to support MTP
             # raise ValueError(
             #     "Guided decoding is not supported with speculative decoding.")
