@@ -48,6 +48,8 @@ class B10Decoder:
                                 scheduled_requests.generation_requests)):
             cur_idx = next_idx
             next_idx += 1 + request.num_draft_tokens
+            if request.is_context_init_state and not request.is_last_context_chunk:
+                continue
 
             is_custom = process_all_requests
 
@@ -69,8 +71,7 @@ class B10Decoder:
                 is_mtp_disabled = True
                 is_custom = True
 
-            if temperature is not None and not math.isclose(
-                    temperature, B10Decoder.DEFAULT_TEMPERATURE):
+            if temperature is not None:
                 assert len(sampling_config.temperature) == 1
                 is_custom = True
                 if temperature < 1e-6:
