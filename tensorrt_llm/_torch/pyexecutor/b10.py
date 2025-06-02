@@ -1,5 +1,4 @@
 import itertools
-import math
 
 import flashinfer
 import torch
@@ -213,8 +212,7 @@ class B10Eagle3Decoder(B10Decoder):
                 is_mtp_disabled = True
                 is_custom = True
 
-            if temperature is not None and not math.isclose(
-                    temperature, B10Decoder.DEFAULT_TEMPERATURE):
+            if temperature is not None:
                 assert len(sampling_config.temperature) == 1
                 is_custom = True
                 if temperature < 1e-6:
