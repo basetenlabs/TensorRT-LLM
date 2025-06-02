@@ -892,16 +892,7 @@ class PyExecutor:
                     continue
                 req.py_last_draft_tokens = req.py_draft_tokens
                 max_draft_len = self.model_engine.spec_config.max_draft_tokens
-                max_seq_len = self.model_engine.max_seq_len
 
-                # Subtract 1 to account for the token we will add on this forward
-                # pass.
-                draft_len = min(max_seq_len - 1 - req.get_num_tokens(0),
-                                max_draft_len)
-
-                if draft_len > 0:
-                    req.py_draft_tokens = [0] * draft_len
-                    req.py_draft_pages_allocated = draft_len
                 if max_draft_len > 0:
                     req.py_draft_tokens = [0] * max_draft_len
                     req.py_draft_pages_allocated = max_draft_len
