@@ -20,10 +20,9 @@ from tensorrt_llm.bindings.internal.runtime import (BufferManager, CudaStream,
                                                     SpeculativeDecodingMode)
 from tensorrt_llm.mapping import Mapping
 
+from .b10 import B10Decoder
 from .llm_request import LlmRequest, LlmRequestState
 from .scheduler import ScheduledRequests
-
-from .b10 import B10Decoder
 
 
 @dataclass
@@ -337,14 +336,13 @@ class TorchDecoder(Decoder):
     def _batch_decode(self, scheduled_requests: ScheduledRequests,
                       model_outputs) -> DecoderState:
         logits = model_outputs["logits"]
-        new_tokens_device = torch.argmax(logits, dim=-1)
+
+        # new_tokens_device = torch.argmax(logits, dim=-1)
 
         # BASETEN DECODING BEGIN
-        _, _, sampled_tokens = B10Decoder.custom_decode(scheduled_requests,
-                                                                  model_outputs,
-                                                                  process_all_requests=True)
-        assert len(new_tokens_device) == len(sampled_tokens)
-        new_tokens_device[:] = sampled_tokens
+        _, _, sampled_tokens = B10Decoder.custom_decode(
+            scheduled_requests, model_outputs, process_all_requests=True)
+        new_tokens_device = sampled_tokens
         # BASETEN DECODING END
 
         new_tokens_host = new_tokens_device.to('cpu', non_blocking=True)

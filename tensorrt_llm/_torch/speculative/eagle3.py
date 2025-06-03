@@ -1,11 +1,18 @@
+import itertools
 from dataclasses import dataclass, field
 from itertools import chain
 from typing import Dict, List, Optional, Tuple
 
 import torch
 
+import tensorrt_llm
+import tensorrt_llm.bindings
+
+from ..pyexecutor.b10 import B10Eagle3Decoder
 from ..pyexecutor.decoder import DecoderState, TorchDecoder
 from .interface import SpecConfig, SpecMetadata, SpeculativeDecodingMode
+
+LlmRequestState = tensorrt_llm.bindings.LlmRequestState
 
 
 @dataclass
@@ -76,7 +83,6 @@ class Eagle3SpecMetadata(SpecMetadata):
                 to_save = hidden_states + residual if residual is not None else hidden_states
                 self.hidden_states.append(to_save)
         else:
-            assert len(self.hidden_states) == len(self.layers_to_capture)
             for i, captured_layer_id in enumerate(self.layers_to_capture):
                 if captured_layer_id == layer_id:
                     to_save = hidden_states + residual if residual is not None else hidden_states
@@ -119,12 +125,62 @@ class Eagle3Decoder(TorchDecoder):
     def _batch_decode(self, scheduled_requests, model_outputs):
         logits = model_outputs["logits"]
         new_tokens_device = torch.argmax(logits, dim=-1)
+
+        # BASETEN EAGLE3 DECODING BEGIN
+        request_idx, _, b10_sampled_tokens = B10Eagle3Decoder.custom_decode(
+            scheduled_requests, model_outputs)
+        b10_sampled_tokens_device = None
+        if len(request_idx) > 0:
+            cur_idx = 0
+            next_idx = 0
+            b10_idx = 0
+            new_tokens = []
+            for request in itertools.chain(
+                    scheduled_requests.context_requests,
+                    scheduled_requests.generation_requests):
+                cur_idx = next_idx
+                next_idx += 1 + (len(request.py_draft_tokens)
+                                 if request.py_draft_tokens is not None else
+                                 request.num_draft_tokens)
+                if not request.is_custom:
+                    new_tokens.append(new_tokens_device[cur_idx:next_idx])
+                    continue
+
+                if not request.is_mtp_disabled:
+                    # use tokens from eagle3
+                    new_tokens.append(new_tokens_device[cur_idx:next_idx])
+                    b10_idx += 1 + (len(request.py_draft_tokens)
+                                    if request.py_draft_tokens is not None else
+                                    request.num_draft_tokens)
+                    continue
+
+                # use tokens from base10 for guided decoding
+                b10_token = b10_sampled_tokens[b10_idx]
+                # ensure the token is at least 1D for concatenation
+                if b10_token.dim() == 0:
+                    b10_token = b10_token.unsqueeze(0)
+                new_tokens.append(b10_token)
+                b10_idx += 1
+
+            new_tokens_device = torch.cat(new_tokens, dim=0)
+            b10_sampled_tokens_device = b10_sampled_tokens
+        # BASETEN EAGLE3 DECODING END
+
         if "d2t" in model_outputs:
             d2t = model_outputs["d2t"]
             new_tokens_device = d2t[new_tokens_device] + new_tokens_device
+            b10_sampled_tokens_device = d2t[
+                b10_sampled_tokens_device] + b10_sampled_tokens_device if len(
+                    request_idx) > 0 else None
+
+        b10_sampled_tokens_host = b10_sampled_tokens_device.to(
+            'cpu', non_blocking=True) if len(request_idx) > 0 else None
         new_tokens_host = new_tokens_device.to('cpu', non_blocking=True)
         new_tensors_device = {"new_tokens_device": new_tokens_device}
-        new_tensors_host = {"new_tokens_host": new_tokens_host}
+        new_tensors_host = {
+            "new_tokens_host": new_tokens_host,
+            "b10_sampled_tokens_host": b10_sampled_tokens_host
+        }
         decoder_event = torch.cuda.Event()
         decoder_event.record()
         return DecoderState(scheduled_requests=scheduled_requests,
@@ -132,3 +188,98 @@ class Eagle3Decoder(TorchDecoder):
                             new_tensors_device=new_tensors_device,
                             new_tensors_host=new_tensors_host,
                             decoder_event=decoder_event)
+
+    def update_requests(self, decoder_state: DecoderState) -> None:
+        """
+        Copied from TorchDecoder.update_requests with the following changes:
+        - b10_tokens_list is only available when there are requests that require b10 sampling
+        - When matching draft tokens, the last token is patched with the b10 token if the request is not complete, this allows us to perform "sampling" while still preserving the performance of EAGLE3.
+        """
+        # TODO: remove duplicate code with TorchDecoder.update_requests
+        if decoder_state.decoder_event:
+            decoder_state.decoder_event.synchronize()
+        new_tokens_list = decoder_state.new_tensors_host[
+            "new_tokens_host"].tolist()
+        b10_tokens_list = decoder_state.new_tensors_host.get(
+            "b10_sampled_tokens_host", None)
+        if b10_tokens_list is not None:
+            b10_tokens_list = b10_tokens_list.tolist()
+        scheduled_requests = decoder_state.scheduled_requests
+
+        idx = 0
+        beam_idx = 0
+        b10_idx = 0
+        for request in scheduled_requests.context_requests:
+            if request.get_context_remaining_length() != 0:
+                idx += 1
+                if request.is_custom:
+                    b10_idx += 1
+                continue
+
+            if request.state != LlmRequestState.GENERATION_COMPLETE:
+                new_token = new_tokens_list[idx]
+                num_tokens = request.add_new_token(new_token, beam_idx)
+                self._handle_stop_criteria(request, new_token, num_tokens,
+                                           beam_idx)
+                request.py_decoding_iter += 1
+            idx += 1
+            if request.is_custom:
+                b10_idx += 1
+
+        if hasattr(scheduled_requests, 'chunked_requests'):
+            idx += len(scheduled_requests.chunked_requests)
+
+        for request in itertools.chain(scheduled_requests.generation_requests):
+            if request.py_draft_tokens is None:
+                if request.state != LlmRequestState.GENERATION_COMPLETE:
+                    new_token = new_tokens_list[idx]
+                    num_tokens = request.add_new_token(new_token, beam_idx)
+                    self._handle_stop_criteria(request, new_token, num_tokens,
+                                               beam_idx)
+                    request.py_decoding_iter += 1
+                idx += 1
+                if request.is_custom:
+                    b10_idx += 1
+                continue
+
+            num_accepted = 0
+            draft_tokens_accepted = []
+            if request.state != LlmRequestState.GENERATION_COMPLETE:
+                new_token = new_tokens_list[idx]
+                num_tokens = request.add_new_token(new_token, beam_idx)
+                stop_criteria_met = self._handle_stop_criteria(
+                    request, new_token, num_tokens, beam_idx)
+                request.py_decoding_iter += 1
+
+                # Accept draft tokens (if we have any) if and only if they match the new
+                # token exactly.
+                if not request.is_mtp_disabled and not stop_criteria_met:
+                    for draft_token in request.py_draft_tokens:
+                        if draft_token != new_token:
+                            # Reject.
+                            break
+
+                        num_accepted += 1
+                        new_token = new_tokens_list[idx + num_accepted]
+                        draft_tokens_accepted.append(new_token)
+                        num_tokens += 1
+                        if self._handle_stop_criteria(request, new_token,
+                                                      num_tokens, beam_idx):
+                            break
+
+            if num_accepted > 0:
+                # if the request is not complete, we can patch the last token with ours.
+                if b10_tokens_list is not None and request.state != LlmRequestState.GENERATION_COMPLETE:
+                    draft_tokens_accepted[num_accepted -
+                                          1] = b10_tokens_list[b10_idx +
+                                                               num_accepted]
+                for token in draft_tokens_accepted:
+                    request.add_new_token(token, beam_idx)
+
+            request.py_num_accepted_draft_tokens = num_accepted
+            request.py_rewind_len = request.py_draft_pages_allocated - num_accepted
+            inc = (len(request.py_draft_tokens)
+                   if not request.is_mtp_disabled else 0) + 1
+            idx += inc
+            if request.is_custom:
+                b10_idx += inc
