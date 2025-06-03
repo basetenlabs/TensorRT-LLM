@@ -162,7 +162,10 @@ class DecodingCUDAGraphRunner:
             for key in self.extra_model_inputs:
                 assert key in extra_model_inputs, f"Graph runner is missing extra input {key}"
                 dst_tensor = self.extra_model_inputs[key]
-                dst_tensor.copy_(extra_model_inputs[key])
+                src_tensor = extra_model_inputs[key]
+                dst_tensor[:src_tensor.shape[0]].copy_(
+                    src_tensor
+                )  # new values might have smaller shape than when the graph was captured
 
         assert self._output is not None and self._graph is not None
         self._graph.replay()
