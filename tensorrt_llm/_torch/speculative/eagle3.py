@@ -83,6 +83,7 @@ class Eagle3SpecMetadata(SpecMetadata):
                 to_save = hidden_states + residual if residual is not None else hidden_states
                 self.hidden_states.append(to_save)
         else:
+            assert len(self.hidden_states) == len(self.layers_to_capture)
             for i, captured_layer_id in enumerate(self.layers_to_capture):
                 if captured_layer_id == layer_id:
                     to_save = hidden_states + residual if residual is not None else hidden_states

@@ -47,6 +47,7 @@ class B10Decoder:
                                 scheduled_requests.generation_requests)):
             cur_idx = next_idx
             next_idx += 1 + request.num_draft_tokens
+
             if request.is_context_init_state and not request.is_last_context_chunk:
                 continue
 
