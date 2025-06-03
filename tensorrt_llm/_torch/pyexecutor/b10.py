@@ -156,6 +156,7 @@ class B10Decoder:
 
 
 class B10Eagle3Decoder(B10Decoder):
+    # TODO: Add common method to reduce repetition with B10Decoder
 
     @staticmethod
     def custom_decode(scheduled_requests: ScheduledRequests,
@@ -219,7 +220,7 @@ class B10Eagle3Decoder(B10Decoder):
                     is_greedy = True
                     temperature = B10Decoder.DEFAULT_TEMPERATURE
 
-            if (top_p is not None and top_p > 0 and top_p < 1):
+            if top_p is not None and 0 < top_p < 1:
                 assert len(sampling_config.top_p) == 1
                 is_custom = True
 

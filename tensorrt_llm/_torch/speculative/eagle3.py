@@ -193,7 +193,9 @@ class Eagle3Decoder(TorchDecoder):
         """
         Copied from TorchDecoder.update_requests with the following changes:
         - b10_tokens_list is only available when there are requests that require b10 sampling
+        - When matching draft tokens, the last token is patched with the b10 token if the request is not complete, this allows us to perform "sampling" while still preserving the performance of EAGLE3.
         """
+        # TODO: remove duplicate code with TorchDecoder.update_requests
         if decoder_state.decoder_event:
             decoder_state.decoder_event.synchronize()
         new_tokens_list = decoder_state.new_tensors_host[

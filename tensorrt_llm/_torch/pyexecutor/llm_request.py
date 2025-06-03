@@ -52,6 +52,7 @@ class LlmRequest(tensorrt_llm.bindings.internal.batch_manager.LlmRequest):
         self.py_decoding_iter = 0
         self.is_attention_dp_dummy = False
         self.is_cuda_graph_dummy = False
+        # B10 fields for custom sampling
         self.is_mtp_disabled = False
         self.is_custom = False
 
